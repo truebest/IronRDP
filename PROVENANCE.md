@@ -52,6 +52,12 @@ record). They touch only:
   gained `impl core::error::Error` so it can be attached as a `PduError` source.
 - `crates/ironrdp-web/{Cargo.toml,src/session.rs}` — upstream reference path (not built
   by `webrdp-min`; kept for parity/provenance).
+- `crates/ironrdp-displaycontrol/src/client.rs` — `DisplayControlClient::process()` decodes
+  the full headered `DISPLAYCONTROL_CAPS_PDU` (MS-RDPEDISP 2.2.2.1) instead of the raw
+  capability body; the raw decode read the header's Type/Length as caps fields, so
+  `max_monitor_area()` came out tiny and callback-produced monitor layouts were never sent.
+  Upstream master has the same bug (its own `DisplayControlServer` and testsuite golden
+  vectors prove the headered shape) — upstream PR candidate.
 
 To regenerate the patch from this tree against the base commit, or to re-apply it on
 a fresh upstream checkout, use `../../patches/ironrdp/0001-gnome-rdp-support.patch` as the canonical patch record.
