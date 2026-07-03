@@ -828,16 +828,32 @@ impl TileState {
             crate::dwt::decode(&mut cr_buf, &mut dwt_temp);
         }
 
-        // YCbCr to RGBA conversion
+        // YCbCr to RGBA conversion.
+        //
+        // The RemoteFX Progressive (de)quantization chain leaves the inverse-DWT
+        // output scaled up by 32 (`<< 5`) relative to true 8-bit sample values:
+        // `progressive_rfx_quant_lsub(&shift, 1)` subtracts only 1 from the
+        // combined base+progressive quant, so the coefficients fed to the IDWT —
+        // and hence these spatial Y/Cb/Cr values — carry 5 extra fractional bits.
+        // FreeRDP's `general_yCbCrToRGB_*` absorbs this by adding the +128 luma
+        // bias pre-scaled (`128 << 5 = 4096`) and dividing the result down by an
+        // extra 5 bits (`>> 21` instead of `>> 16`). Treating the coefficients as
+        // 1x-scaled (the classic non-progressive convention) over-drives the
+        // chroma terms by 32x, which is what produced the cyan/red/green fringing.
+        //
+        // Fixed-point ITU-R BT.601, matching FreeRDP's progressive constants:
+        //   R = Y + 1.402   * Cr
+        //   G = Y - 0.344136 * Cb - 0.714136 * Cr
+        //   B = Y + 1.772   * Cb
         for i in 0..64 * 64 {
-            let y = i32::from(y_buf[i]) + 128;
+            // Lift the (<<5-scaled) luma into <<16 fixed point and re-bias by 128.
+            let y = (i32::from(y_buf[i]) + 4096) << 16;
             let cb = i32::from(cb_buf[i]);
             let cr = i32::from(cr_buf[i]);
 
-            // ITU-R BT.601 YCbCr to RGB conversion
-            let r = y + ((cr * 91881 + 32768) >> 16);
-            let g = y - ((cb * 22554 + cr * 46802 + 32768) >> 16);
-            let b = y + ((cb * 116130 + 32768) >> 16);
+            let r = (y + cr * 91916) >> 21;
+            let g = (y - cb * 22527 - cr * 46819) >> 21;
+            let b = (y + cb * 115992) >> 21;
 
             let off = i * 4;
             pixels[off] = clamp_u8(r);
@@ -1004,6 +1020,8 @@ impl core::fmt::Display for ProgressiveDecodeError {
     }
 }
 
+impl core::error::Error for ProgressiveDecodeError {}
+
 impl From<ironrdp_core::DecodeError> for ProgressiveDecodeError {
     fn from(e: ironrdp_core::DecodeError) -> Self {
         Self::Pdu(e)
@@ -1076,39 +1094,31 @@ impl ProgressiveDecoder {
 
         let blocks = decode_progressive_stream(bitmap_data)?;
 
-        // Extract the band-layout flag from the CONTEXT block when present.
-        // Per MS-RDPEGFX 2.2.4.2 the SYNC + CONTEXT blocks establish a codec
-        // context once (keyed by `codec_context_id`) and are not required to be
-        // repeated on subsequent frames that reference the same context.
-        // Real-world servers (xrdp, GNOME Remote Desktop) omit the CONTEXT
-        // block on every frame after the first one that established the
-        // context. The strict requirement rejected each of those frames with
-        // `MissingBlock("CONTEXT")`, freezing the image on the coarse first
-        // pass.
-        //
-        // Fall back to the value stored when the context was first created.
-        // Only error when neither source is available, i.e. the very first
-        // frame for a context arrived without a CONTEXT block.
-        let use_reduce_extrapolate = match blocks.iter().find_map(|block| match block {
+        // Extract context flags from the CONTEXT block. Per MS-RDPEGFX 2.2.4.2
+        // a Progressive stream MUST begin with SYNC + CONTEXT; treat absence as
+        // a malformed stream rather than silently defaulting band layout.
+        // The CONTEXT block (carrying the reduce-extrapolate flag) is only sent on the
+        // FIRST frame for a given codec context. Subsequent frames in the same stream
+        // omit SYNC/CONTEXT and just carry REGION blocks, reusing the negotiated value.
+        let context_flag = blocks.iter().find_map(|block| match block {
             ProgressiveBlock::Context(ctx) => Some(ctx.uses_reduce_extrapolate()),
             _ => None,
-        }) {
-            Some(v) => v,
-            None => self
-                .contexts
-                .get(&codec_context_id)
-                .map(|c| c.surface.use_reduce_extrapolate)
-                .ok_or(ProgressiveDecodeError::MissingBlock("CONTEXT"))?,
-        };
+        });
 
         // Get or create the context for this codec_context_id
         let context = match self.contexts.entry(codec_context_id) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
+                // A new context MUST be established by a CONTEXT block on its first frame.
+                let use_reduce_extrapolate = context_flag.ok_or(ProgressiveDecodeError::MissingBlock("CONTEXT"))?;
                 let surface = SurfaceTiles::new(surface_width, surface_height, use_reduce_extrapolate)?;
                 e.insert(ProgressiveContext { surface })
             }
         };
+
+        // Use the freshly-signalled flag if a CONTEXT block was present this frame,
+        // otherwise keep the value negotiated when the context was created.
+        let use_reduce_extrapolate = context_flag.unwrap_or(context.surface.use_reduce_extrapolate);
 
         // If surface dimensions changed, reallocate
         let expected_wide = surface_width.div_ceil(64);

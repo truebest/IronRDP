@@ -22,6 +22,10 @@ use ironrdp::connector::credssp::KerberosConfig;
 use ironrdp::connector::{self, ClientConnector, Credentials};
 use ironrdp::displaycontrol::client::DisplayControlClient;
 use ironrdp::dvc::DrdynvcClient;
+use ironrdp_egfx::client::{BitmapUpdate, GraphicsPipelineClient, GraphicsPipelineHandler, Surface};
+use ironrdp_egfx::pdu::GfxPdu;
+use ironrdp_pdu::geometry::InclusiveRectangle;
+use std::sync::{Arc, Mutex};
 use ironrdp::graphics::image_processing::PixelFormat;
 use ironrdp::pdu::input::fast_path::FastPathInputEvent;
 use ironrdp::pdu::rdp::capability_sets::client_codecs_capabilities;
@@ -474,7 +478,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
 
         let use_display_control = self.0.borrow().use_display_control;
 
-        let (connection_result, ws) = connect(ConnectParams {
+        let (connection_result, ws, gfx_framebuffer) = connect(ConnectParams {
             ws,
             config,
             proxy_auth_token: auth_token,
@@ -514,6 +518,7 @@ impl iron_remote_desktop::SessionBuilder for SessionBuilder {
             connection_result: RefCell::new(Some(connection_result)),
             clipboard: RefCell::new(Some(clipboard)),
             printer: RefCell::new(Some(printer)),
+            gfx_framebuffer,
         })
     }
 }
@@ -563,6 +568,10 @@ pub(crate) struct Session {
     rdp_reader: RefCell<Option<ReadHalf<WebSocket>>>,
     clipboard: RefCell<Option<Option<WasmClipboard>>>,
     printer: RefCell<Option<Option<WasmPrinter>>>,
+
+    /// Decoded EGFX (RemoteFX Progressive) tiles queued by the graphics handler,
+    /// drained and composited to the canvas by the render loop.
+    gfx_framebuffer: Arc<Mutex<GfxFramebuffer>>,
 }
 
 impl Session {
@@ -674,6 +683,11 @@ impl iron_remote_desktop::Session for Session {
             pointer_software_rendering: connection_result.pointer_software_rendering,
         }
         .build();
+
+        // EGFX tiles are decoded inside channel processing (the handler) and queued here;
+        // we drain and composite them to the canvas each loop iteration.
+        let gfx_fb = Arc::clone(&self.gfx_framebuffer);
+        let (gfx_w, gfx_h) = (desktop_width.get(), desktop_height.get());
 
         // Timer interval for driving clipboard lock timeouts (5 second interval)
         let mut cleanup_interval = IntervalStream::new(5_000).fuse();
@@ -886,6 +900,10 @@ impl iron_remote_desktop::Session for Session {
                     }
                 }
             };
+
+            // Composite any EGFX (RemoteFX Progressive) tiles decoded while processing
+            // this frame's input above.
+            draw_gfx_tiles(&gfx_fb, &mut gui, gfx_w, gfx_h)?;
 
             for out in outputs {
                 match out {
@@ -1517,6 +1535,108 @@ struct ConnectParams {
     use_display_control: bool,
 }
 
+/// A decoded GFX tile (RGBA) awaiting compositing to the canvas.
+struct GfxTileUpdate {
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+    rgba: Vec<u8>,
+}
+
+/// Shared between the EGFX handler (producer, runs inside channel processing) and the
+/// render loop (consumer). The handler must be `Send`, so this uses `Arc<Mutex<_>>`
+/// (cheap in single-threaded wasm) rather than `Rc<RefCell<_>>`.
+#[derive(Default)]
+struct GfxFramebuffer {
+    pending: Vec<GfxTileUpdate>,
+}
+
+/// EGFX handler for gnome-remote-desktop: decoded RemoteFX-Progressive tiles arrive
+/// via `on_bitmap_updated` and are queued into the shared framebuffer for the render
+/// loop to composite onto the canvas.
+struct GfxRenderHandler {
+    bitmaps: u32,
+    fb: Arc<Mutex<GfxFramebuffer>>,
+}
+
+impl GraphicsPipelineHandler for GfxRenderHandler {
+    fn on_reset_graphics(&mut self, width: u32, height: u32) {
+        info!(width, height, "EGFX: reset_graphics");
+        if let Ok(mut fb) = self.fb.lock() {
+            fb.pending.clear();
+        }
+    }
+
+    fn on_surface_created(&mut self, surface: &Surface) {
+        info!(id = surface.id, w = surface.width, h = surface.height, "EGFX: surface_created");
+    }
+
+    fn on_surface_mapped(&mut self, surface_id: u16, origin_x: u32, origin_y: u32) {
+        info!(surface_id, origin_x, origin_y, "EGFX: surface_mapped");
+    }
+
+    fn on_bitmap_updated(&mut self, update: &BitmapUpdate) {
+        self.bitmaps = self.bitmaps.saturating_add(1);
+        if let Ok(mut fb) = self.fb.lock() {
+            fb.pending.push(GfxTileUpdate {
+                left: update.destination_rectangle.left,
+                top: update.destination_rectangle.top,
+                width: update.width,
+                height: update.height,
+                rgba: update.data.clone(),
+            });
+        }
+    }
+
+    fn on_unhandled_pdu(&mut self, pdu: &GfxPdu) {
+        warn!(pdu = ?core::mem::discriminant(pdu), "EGFX: UNHANDLED pdu (codec not decoded)");
+    }
+}
+
+/// Drain queued GFX tiles and composite them onto the canvas. Tiles are up to 64x64 in
+/// surface coordinates; clip to canvas bounds and repack the clipped region row-by-row
+/// (source rows are `width` pixels wide).
+fn draw_gfx_tiles(
+    fb: &Arc<Mutex<GfxFramebuffer>>,
+    gui: &mut Canvas,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> anyhow::Result<()> {
+    let tiles = match fb.lock() {
+        Ok(mut fb) => core::mem::take(&mut fb.pending),
+        Err(_) => return Ok(()),
+    };
+    for t in tiles {
+        let (left, top) = (u32::from(t.left), u32::from(t.top));
+        if left >= canvas_width || top >= canvas_height {
+            continue;
+        }
+        let tile_w = u32::from(t.width);
+        let clip_w = tile_w.min(canvas_width - left);
+        let clip_h = u32::from(t.height).min(canvas_height - top);
+        if clip_w == 0 || clip_h == 0 {
+            continue;
+        }
+        let row_bytes = (clip_w * 4) as usize;
+        let mut buf = Vec::with_capacity(row_bytes * clip_h as usize);
+        for row in 0..clip_h {
+            let off = (row * tile_w * 4) as usize;
+            if off + row_bytes <= t.rgba.len() {
+                buf.extend_from_slice(&t.rgba[off..off + row_bytes]);
+            }
+        }
+        let region = InclusiveRectangle {
+            left: t.left,
+            top: t.top,
+            right: t.left + (clip_w as u16) - 1,
+            bottom: t.top + (clip_h as u16) - 1,
+        };
+        gui.draw(&buf, region).context("draw gfx tile")?;
+    }
+    Ok(())
+}
+
 fn default_printer_driver_name() -> String {
     printer_driver_name_for_macos_major_version(browser_macos_major_version()).to_owned()
 }
@@ -1565,7 +1685,7 @@ async fn connect(
         computer_name,
         use_display_control,
     }: ConnectParams,
-) -> Result<(connector::ConnectionResult, WebSocket), IronError> {
+) -> Result<(connector::ConnectionResult, WebSocket, Arc<Mutex<GfxFramebuffer>>), IronError> {
     let mut framed = ironrdp_futures::LocalFuturesFramed::new(ws);
 
     // In web browser environments, we do not have an easy access to the local address of the socket.
@@ -1591,10 +1711,26 @@ async fn connect(
         );
     }
 
-    if use_display_control {
-        connector.attach_static_channel(
-            DrdynvcClient::new().with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new()))),
-        );
+    // Shared framebuffer: the EGFX handler queues decoded tiles here; the render loop
+    // (in `run`) drains and composites them to the canvas.
+    let gfx_framebuffer: Arc<Mutex<GfxFramebuffer>> = Arc::new(Mutex::new(GfxFramebuffer::default()));
+    {
+        // Always advertise drdynvc + the Graphics Pipeline (EGFX). gnome-remote-desktop
+        // is GFX-only and rejects clients that don't advertise the Graphics Pipeline.
+        // No H.264 decoder (None) -> a no-AVC capability set is advertised, so gnome
+        // streams RemoteFX Progressive, which we decode in pure Rust.
+        let mut drdynvc = DrdynvcClient::new();
+        if use_display_control {
+            drdynvc = drdynvc.with_dynamic_channel(DisplayControlClient::new(|_| Ok(Vec::new())));
+        }
+        drdynvc = drdynvc.with_dynamic_channel(GraphicsPipelineClient::new(
+            Box::new(GfxRenderHandler {
+                bitmaps: 0,
+                fb: Arc::clone(&gfx_framebuffer),
+            }),
+            None,
+        ));
+        connector.attach_static_channel(drdynvc);
     }
 
     let (upgraded, server_public_key) =
@@ -1620,7 +1756,7 @@ async fn connect(
 
     let ws = framed.into_inner_no_leftover();
 
-    Ok((connection_result, ws))
+    Ok((connection_result, ws, gfx_framebuffer))
 }
 
 async fn connect_rdcleanpath<S>(

@@ -140,34 +140,22 @@ impl Sequence for ConnectionActivationSequence {
                     );
                 }
 
-                // Some servers (e.g. GNOME Remote Desktop) send a ServerDeactivateAll PDU
-                // before ServerDemandActive as part of a Deactivation-Reactivation Sequence
-                // (MS-RDPBCGR §1.3.1.3). Skip it and stay in the same state to wait for
-                // the actual DemandActive PDU.
-                //
-                // The decoded PDU is intentionally discarded: the DeactivateAll body carries
-                // no payload we need during initial activation.
-                if matches!(
-                    share_control_ctx.pdu,
-                    rdp::headers::ShareControlPdu::ServerDeactivateAll(_)
-                ) {
-                    debug!(
-                        "Skipping Server Deactivate All PDU received during Capabilities Exchange, awaiting Server Demand Active"
-                    );
-                    self.state = ConnectionActivationState::CapabilitiesExchange;
-                    return Ok(Written::Nothing);
-                }
-
+                // Some servers (e.g. GNOME Remote Desktop) interleave a ServerDeactivateAll
+                // PDU — and even Share Data PDUs — before the ServerDemandActive during a
+                // Deactivation-Reactivation Sequence (MS-RDPBCGR §1.3.1.3). Skip anything that
+                // is not the DemandActive and stay in this state until it actually arrives.
+                // (mstsc/FreeRDP tolerate the same interleaving.)
                 let capability_sets = if let rdp::headers::ShareControlPdu::ServerDemandActive(server_demand_active) =
                     share_control_ctx.pdu
                 {
                     server_demand_active.pdu.capability_sets
                 } else {
-                    return Err(reason_err!(
-                        "ConnectionActivation::CapabilitiesExchange",
-                        "unexpected Share Control PDU during capabilities exchange: got {} (expected Server Demand Active PDU)",
-                        share_control_ctx.pdu.as_short_name(),
-                    ));
+                    debug!(
+                        pdu = share_control_ctx.pdu.as_short_name(),
+                        "Skipping non-DemandActive Share Control PDU during Capabilities Exchange, awaiting Server Demand Active"
+                    );
+                    self.state = ConnectionActivationState::CapabilitiesExchange;
+                    return Ok(Written::Nothing);
                 };
 
                 for c in &capability_sets {

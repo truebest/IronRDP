@@ -1,9 +1,9 @@
 [workspace]
+# Vendored subset for webrdp-min (webOS Chromium-94 RDP client). The upstream
+# benches/xtask/ffi/fuzz/web-client members were dropped from this copy (they are
+# not needed to build the protocol crates webrdp-min depends on); see PROVENANCE.md.
 members = [
   "crates/*",
-  "benches",
-  "xtask",
-  "ffi",
 ]
 resolver = "2"
 

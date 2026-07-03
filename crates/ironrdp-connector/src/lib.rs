@@ -7,6 +7,7 @@ mod channel_connection;
 mod connection;
 pub mod connection_activation;
 mod connection_finalization;
+#[cfg(feature = "credssp")]
 pub mod credssp;
 mod license_exchange;
 mod server_name;
@@ -21,6 +22,7 @@ use ironrdp_pdu::rdp::capability_sets::{self, BitmapCodecs};
 use ironrdp_pdu::rdp::client_info::{self, PerformanceFlags, TimezoneInfo};
 use ironrdp_pdu::x224::X224;
 use ironrdp_pdu::{PduHint, gcc, x224};
+#[cfg(feature = "credssp")]
 pub use sspi;
 
 pub use self::channel_connection::{ChannelConnectionSequence, ChannelConnectionState};
@@ -340,6 +342,7 @@ pub type ConnectorResult<T> = Result<T, ConnectorError>;
 pub enum ConnectorErrorKind {
     Encode(ironrdp_core::EncodeError),
     Decode(ironrdp_core::DecodeError),
+    #[cfg(feature = "credssp")]
     Credssp(sspi::Error),
     Reason(String),
     AccessDenied,
@@ -353,6 +356,7 @@ impl fmt::Display for ConnectorErrorKind {
         match &self {
             ConnectorErrorKind::Encode(_) => write!(f, "encode error"),
             ConnectorErrorKind::Decode(_) => write!(f, "decode error"),
+            #[cfg(feature = "credssp")]
             ConnectorErrorKind::Credssp(_) => write!(f, "CredSSP"),
             ConnectorErrorKind::Reason(description) => write!(f, "reason: {description}"),
             ConnectorErrorKind::AccessDenied => write!(f, "access denied"),
@@ -368,6 +372,7 @@ impl core::error::Error for ConnectorErrorKind {
         match &self {
             ConnectorErrorKind::Encode(e) => Some(e),
             ConnectorErrorKind::Decode(e) => Some(e),
+            #[cfg(feature = "credssp")]
             ConnectorErrorKind::Credssp(e) => Some(e),
             ConnectorErrorKind::Reason(_) => None,
             ConnectorErrorKind::AccessDenied => None,
