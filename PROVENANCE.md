@@ -1,9 +1,10 @@
-# third_party/IronRDP — vendored, patched IronRDP
+# third_party/IronRDP — gnomecast IronRDP fork
 
-This is a **durable in-repo vendored copy** of [Devolutions/IronRDP](https://github.com/Devolutions/IronRDP),
-patched for gnome-remote-desktop. It replaces the previous ephemeral `/tmp/IronRDP`
-checkout that `webrdp-min/Cargo.toml` used to point at, so the build no longer
-depends on anything outside this repository.
+This is gnomecast's **fork of [Devolutions/IronRDP](https://github.com/Devolutions/IronRDP)**
+(https://github.com/truebest/IronRDP, branch `gnome-rdp-support`), patched for
+gnome-remote-desktop and consumed by the gnomecast repository as a git submodule at
+`third_party/IronRDP`. It was previously vendored in-repo; the fork carries the full
+upstream history up to the base commit plus the gnomecast delta on top.
 
 ## Upstream base
 
@@ -57,7 +58,7 @@ a fresh upstream checkout, use `../../patches/ironrdp/0001-gnome-rdp-support.pat
 
 ## What was trimmed from the upstream tree
 
-To keep the vendored copy lean, these non-essential upstream paths were **not** copied
+To keep the fork lean, these non-essential upstream paths were removed
 (they are not needed to build the protocol crates `webrdp-min` depends on):
 `web-client/`, `ffi/`, `benches/`, `xtask/`, `fuzz/`, `.git/`, `.github/`, and the
 upstream `CLAUDE.md`/`AGENTS.md` agent manuals. The workspace `members` list in
@@ -65,16 +66,9 @@ upstream `CLAUDE.md`/`AGENTS.md` agent manuals. The workspace `members` list in
 so workspace inheritance (`workspace.package` / `workspace.dependencies` /
 `workspace.lints`) resolves exactly as upstream.
 
-## Remaining (optional) fork/push step
+## Updating from upstream
 
-This vendored copy is fully self-contained and needs no remote. If a GitHub fork is
-later desired (e.g. to track upstream via a submodule instead of a vendored tree):
-
-1. `gh repo fork Devolutions/IronRDP` (or create a new repo), check out base commit
-   `9046144`, `git apply patches/ironrdp/0001-gnome-rdp-support.patch`, commit on a
-   `gnome-rdp-support` branch, and push.
-2. Replace this directory with `git submodule add <fork-url> third_party/IronRDP`
-   pinned to that commit, and keep `webrdp-min/Cargo.toml` paths unchanged
-   (`../third_party/IronRDP/crates/*`).
-
-Until then, the vendored tree IS the durable source of truth.
+Merge or rebase `gnome-rdp-support` onto a newer upstream commit, resolve conflicts in
+the files listed above, then regenerate gnomecast's mirror patch record
+(`patches/ironrdp/0001-gnome-rdp-support.patch`) against the new base commit and bump
+the submodule pin in the gnomecast repository.
