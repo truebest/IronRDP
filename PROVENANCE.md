@@ -9,33 +9,32 @@ upstream history up to the base commit plus the gnomecast delta on top.
 ## Upstream base
 
 - Repo: `https://github.com/Devolutions/IronRDP`
-- Base commit: `90461444f994e68847c38f7f1c27d21fe95f2839`
+- Base commit: `c0a29813bfbdf5db54e8f0dbb7c4ad12a3d83c16`
 - Workspace edition: 2024 (toolchain pinned `1.89.0` in `rust-toolchain.toml`;
   webrdp-min builds with the repo's rustup default ≥1.85 and does not depend on
   this pin, since cargo is invoked from `webrdp-min/`).
 
 ## Local delta (the gnome-remote-desktop patch)
 
-The working-tree changes over the base commit are captured, byte-for-byte, in
-`../../patches/ironrdp/0001-gnome-rdp-support.patch` (the canonical provenance
-record). They touch only:
+The git history on `gnome-rdp-support` is the canonical provenance record — the delta
+is small enough now that a separate mirrored `.patch` file isn't kept. As of the base
+commit above, upstream has independently absorbed the SUPPORT_NET_CHAR_AUTODETECT /
+MCS-message-channel / connect-time-RTT autodetect work this fork originally added
+(`ironrdp-connector::connection.rs`'s state machine, `ironrdp-session`'s x224 `Processor`
+and `ActiveStage`, and the autodetect testsuite are now identical to upstream). What
+remains local:
 
-- `crates/ironrdp-connector/{Cargo.toml,src/connection.rs,src/connection_activation.rs,src/lib.rs}`
-  — CredSSP made an optional feature (`default = ["credssp"]`); DeactivateAll→DemandActive
-  reactivation tolerance; `SUPPORT_DYN_VC_GFX_PROTOCOL` early-capability bit;
-  network-characteristics autodetection support: `SUPPORT_NET_CHAR_AUTODETECT` +
-  `ClientMessageChannelData` GCC blocks, the server-granted MCS message channel captured
-  into `ConnectionResult.message_channel_id` (and joined when channel-join isn't skipped),
-  and the previously pass-through `ConnectTimeAutoDetection` connector state now answers
-  connect-time RTT/bandwidth-measure requests on the message channel until licensing
-  starts — FreeRDP-based servers (gnome-remote-desktop) otherwise disable audio output
-  redirection, and once the client advertises the capability the server blocks the
-  connection waiting for these responses.
-- `crates/ironrdp-session/{src/x224/mod.rs,src/active_stage.rs}` — the x224 `Processor`
-  learns `message_channel_id` and answers continuous autodetect RTT requests arriving on
-  the MCS message channel during the active session (gnome-remote-desktop pings these to
-  estimate audio render latency); `crates/ironrdp-testsuite-core/tests/session/autodetect.rs`
-  updated for the new `Processor::new` arity.
+- `crates/ironrdp-connector/src/lib.rs` — CredSSP gated behind a `credssp` Cargo feature
+  (`sspi`/`picky*` become optional deps) so `webrdp-min` can build the connector without
+  pulling in Kerberos/NLA.
+- `crates/ironrdp-connector/src/connection.rs` — on top of upstream's RTT-only
+  connect-time autodetect response, this fork also answers Bandwidth-Measure-Start/
+  Payload/Stop with real timing (`process_connect_time_autodetect`), and keeps
+  `SUPPORT_DYN_VC_GFX_PROTOCOL` in the early-capability flags so FreeRDP-based servers
+  (gnome-remote-desktop) grant the Graphics Pipeline (EGFX).
+- `crates/ironrdp-connector/src/connection_activation.rs` — broadens upstream's
+  DeactivateAll-only tolerance during Capabilities Exchange to skip any non-DemandActive
+  Share Control PDU (gnome-remote-desktop interleaves more than just DeactivateAll here).
 - `crates/ironrdp-session/Cargo.toml` — connector consumed with `default-features = false`.
 - `crates/ironrdp-egfx/src/client.rs`, `crates/ironrdp-graphics/src/progressive.rs`
   — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; a
@@ -59,8 +58,8 @@ record). They touch only:
   Upstream master has the same bug (its own `DisplayControlServer` and testsuite golden
   vectors prove the headered shape) — upstream PR candidate.
 
-To regenerate the patch from this tree against the base commit, or to re-apply it on
-a fresh upstream checkout, use `../../patches/ironrdp/0001-gnome-rdp-support.patch` as the canonical patch record.
+To see the delta against upstream directly, diff this tree against the base commit above
+(`git diff <base-commit> HEAD -- crates/`).
 
 ## What was trimmed from the upstream tree
 
@@ -74,7 +73,7 @@ so workspace inheritance (`workspace.package` / `workspace.dependencies` /
 
 ## Updating from upstream
 
-Merge or rebase `gnome-rdp-support` onto a newer upstream commit, resolve conflicts in
-the files listed above, then regenerate gnomecast's mirror patch record
-(`patches/ironrdp/0001-gnome-rdp-support.patch`) against the new base commit and bump
-the submodule pin in the gnomecast repository.
+Rebase `gnome-rdp-support` onto a newer upstream commit, resolve conflicts in the files
+listed above (checking whether upstream has absorbed any of this fork's delta, as it did
+for the autodetect/message-channel work), update the base commit above, then bump the
+submodule pin in the gnomecast repository.

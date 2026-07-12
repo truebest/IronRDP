@@ -21,12 +21,5 @@ alloc = []
 
 [dependencies]
 
-[dev-dependencies]
-criterion = { version = "0.8", features = ["html_reports"] }
-
-[[bench]]
-name = "bulk_compression"
-harness = false
-
 [lints]
 workspace = true

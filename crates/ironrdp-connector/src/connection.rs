@@ -281,7 +281,7 @@ impl ClientConnector {
         input: &[u8],
         output: &mut WriteBuf,
     ) -> ConnectorResult<Written> {
-        let ctx = crate::legacy::decode_send_data_indication(input)?;
+        let ctx = mcs::decode_send_data_indication(input).map_err(ConnectorError::decode)?;
         let mut cursor = ReadCursor::new(ctx.user_data);
         let header = BasicSecurityHeader::decode(&mut cursor).map_err(ConnectorError::decode)?;
         if !header.flags.contains(BasicSecurityHeaderFlags::AUTODETECT_REQ) {
@@ -337,7 +337,7 @@ impl ClientConnector {
 
         match response {
             Some(response) => {
-                let written = crate::legacy::encode_send_data_request(
+                let written = encode_send_data_request(
                     user_channel_id,
                     message_channel_id,
                     &SecuredAutoDetectResponse(response),
@@ -653,7 +653,9 @@ impl Sequence for ClientConnector {
                 io_channel_id,
                 user_channel_id,
             } => {
-                let channel_id = crate::legacy::decode_send_data_indication(input)?.channel_id;
+                let channel_id = mcs::decode_send_data_indication(input)
+                    .map_err(ConnectorError::decode)?
+                    .channel_id;
                 if self.message_channel_id == Some(channel_id) {
                     let written = self.process_connect_time_autodetect(channel_id, user_channel_id, input, output)?;
                     (
