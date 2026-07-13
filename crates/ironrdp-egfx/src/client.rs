@@ -68,9 +68,9 @@ use crate::decode::H264Decoder;
 use crate::pdu::{
     Avc420BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesAdvertisePdu, CapabilitiesV8Flags,
     CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet, Codec1Type, DeleteEncodingContextPdu,
-    EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToOutputPdu, MapSurfaceToScaledOutputPdu,
-    MapSurfaceToScaledWindowPdu, MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu,
-    SurfaceToCachePdu, SurfaceToSurfacePdu, WireToSurface2Pdu,
+    EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu,
+    MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu, SurfaceToCachePdu,
+    SurfaceToSurfacePdu, WireToSurface2Pdu,
 };
 
 /// Max capacity to keep for decompressed buffer when cleared.
@@ -310,15 +310,6 @@ pub trait GraphicsPipelineHandler: Send {
     /// [MS-RDPEGFX 3.3.5.8]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/9dd32c5c-fabc-497b-81be-776fa581a4f6
     fn on_evict_cache_entry(&mut self, _pdu: &EvictCacheEntryPdu) {}
 
-    /// Called when the server maps a surface to an absolute position on the output
-    ///
-    /// Per [MS-RDPEGFX 2.2.2.15]. Unlike the other `on_map_surface_to_*` variants, the base
-    /// `handle_pdu` dispatcher previously consumed this PDU internally (to track
-    /// `Surface::output_origin_x/y`) without exposing it to the handler at all.
-    ///
-    /// [MS-RDPEGFX 2.2.2.15]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/a1c6ff83-c385-4ad6-9437-f17697cc001c
-    fn on_map_surface_to_output(&mut self, _pdu: &MapSurfaceToOutputPdu) {}
-
     /// Called when the server maps a surface to a RAIL window
     ///
     /// Per [MS-RDPEGFX 2.2.2.20].
@@ -512,7 +503,6 @@ impl GraphicsPipelineClient {
             }
             GfxPdu::MapSurfaceToOutput(map) => {
                 self.handle_map_surface(map.surface_id, map.output_origin_x, map.output_origin_y);
-                self.handler.on_map_surface_to_output(&map);
                 Ok(vec![])
             }
             GfxPdu::StartFrame(start) => {
