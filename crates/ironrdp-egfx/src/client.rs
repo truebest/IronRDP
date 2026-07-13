@@ -352,7 +352,15 @@ pub trait GraphicsPipelineHandler: Send {
     /// is the raw H.264 bitstream (AVC length-prefixed). Return `true` to take ownership
     /// of the frame (e.g. to hardware-decode it on the host via WebCodecs), which skips
     /// the built-in software H.264 decode for this frame.
-    fn on_avc420_frame(&mut self, _surface_id: u16, _left: u16, _top: u16, _width: u16, _height: u16, _nal: &[u8]) -> bool {
+    fn on_avc420_frame(
+        &mut self,
+        _surface_id: u16,
+        _left: u16,
+        _top: u16,
+        _width: u16,
+        _height: u16,
+        _nal: &[u8],
+    ) -> bool {
         false
     }
 
@@ -603,7 +611,8 @@ impl GraphicsPipelineClient {
                 // same codec_context_id (permitted by spec once deleted) is forced to
                 // re-establish it via a fresh CONTEXT block instead of decoding REGION
                 // updates against stale tiles.
-                self.progressive_decoder.delete_context(pdu.codec_context_id);
+                self.progressive_decoder
+                    .delete_context(pdu.surface_id, pdu.codec_context_id);
                 self.handler.on_delete_encoding_context(&pdu);
                 Ok(vec![])
             }
@@ -777,19 +786,19 @@ impl GraphicsPipelineClient {
     /// updated 64x64 tile through `on_bitmap_updated`. gnome-remote-desktop streams
     /// graphics this way once AVC is disabled, so this is the primary path for it.
     fn handle_wire_to_surface2(&mut self, pdu: WireToSurface2Pdu) -> PduResult<()> {
-        let Some(surface) = self.surfaces.get(&pdu.surface_id) else {
-            warn!(surface_id = pdu.surface_id, "WireToSurface2 for unknown surface");
-            return Ok(());
-        };
+        let surface = self
+            .surfaces
+            .get(&pdu.surface_id)
+            .ok_or_else(|| pdu_other_err!("unknown surface in WireToSurface2"))?;
         let (surface_width, surface_height) = (surface.width, surface.height);
 
-        // Unlike an unknown surface (which can benignly race a queued update against a
-        // DeleteSurface), a decode failure here means the tile/context state for this
-        // codec_context_id is now unreliable: silently returning would leave the native
-        // worker in Active state with no further bitmap callbacks, presenting a
-        // black/stale screen with no indication anything went wrong. Match
-        // decode_avc420()'s behavior and propagate this as a terminal error instead.
+        // A decode failure here means the tile/context state for this codec_context_id is
+        // now unreliable: silently returning would leave the native worker in Active state
+        // with no further bitmap callbacks, presenting a black/stale screen with no
+        // indication anything went wrong. Match decode_avc420()'s behavior and propagate
+        // this as a terminal error instead.
         let tiles = match self.progressive_decoder.decode_bitmap(
+            pdu.surface_id,
             pdu.codec_context_id,
             surface_width,
             surface_height,
@@ -797,29 +806,40 @@ impl GraphicsPipelineClient {
         ) {
             Ok(tiles) => tiles,
             Err(e) => {
-                warn!(error = ?e, "RFX progressive decode failed");
-                return Err(pdu_other_err!("RFX progressive decode failed", source: e));
+                warn!(error = ?e, "rfx progressive decode failed");
+                return Err(pdu_other_err!("rfx progressive decode failed", source: e));
             }
         };
 
-        // Each tile is a 64x64 RGBA block placed on the surface tile grid. Emit it as a
-        // decoded BitmapUpdate (codec marked Uncompressed, since the data is already RGBA)
-        // so it flows through the same handler path as the other codecs.
+        // Each tile is a 64x64 RGBA block placed on the surface tile grid, but the decoder
+        // always returns a full 64x64 block even when the surface's own dimensions aren't a
+        // multiple of 64 (the common case, e.g. 1080p height). Clip the rectangle and crop
+        // the RGBA buffer to the surface bounds so we never claim pixels past the edge.
         for tile in tiles {
             let left = tile.x_idx.saturating_mul(64);
             let top = tile.y_idx.saturating_mul(64);
+            let width = surface_width.saturating_sub(left).min(64);
+            let height = surface_height.saturating_sub(top).min(64);
+            if width == 0 || height == 0 {
+                continue;
+            }
+            let data = if width == 64 && height == 64 {
+                tile.pixels
+            } else {
+                crop_decoded_frame(&tile.pixels, 64, 64, width, height)
+            };
             let update = BitmapUpdate {
                 surface_id: pdu.surface_id,
                 destination_rectangle: ExclusiveRectangle {
                     left,
                     top,
-                    right: left.saturating_add(64),
-                    bottom: top.saturating_add(64),
+                    right: left + width,
+                    bottom: top + height,
                 },
                 codec_id: Codec1Type::Uncompressed,
-                data: tile.pixels,
-                width: 64,
-                height: 64,
+                data,
+                width,
+                height,
             };
             self.handler.on_bitmap_updated(&update);
         }
@@ -1240,7 +1260,11 @@ mod tests {
             pixel_format: PixelFormat::XRgb,
             bitmap_data: build_progressive_stream(true),
         }));
-        assert!(result.is_ok(), "establishing the context should succeed: {:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "establishing the context should succeed: {:?}",
+            result.as_ref().err()
+        );
 
         let _ = client.handle_pdu(GfxPdu::ResetGraphics(crate::pdu::ResetGraphicsPdu {
             width: 1920,
@@ -1266,7 +1290,10 @@ mod tests {
             pixel_format: PixelFormat::XRgb,
             bitmap_data: build_progressive_stream(false),
         }));
-        assert!(result.is_err(), "progressive decoder context must not survive ResetGraphics");
+        assert!(
+            result.is_err(),
+            "progressive decoder context must not survive ResetGraphics"
+        );
     }
 
     #[test]
@@ -1288,7 +1315,11 @@ mod tests {
             pixel_format: PixelFormat::XRgb,
             bitmap_data: build_progressive_stream(true),
         }));
-        assert!(result.is_ok(), "establishing the context should succeed: {:?}", result.as_ref().err());
+        assert!(
+            result.is_ok(),
+            "establishing the context should succeed: {:?}",
+            result.as_ref().err()
+        );
 
         let _ = client.handle_pdu(GfxPdu::DeleteEncodingContext(DeleteEncodingContextPdu {
             surface_id: 1,
@@ -1304,7 +1335,10 @@ mod tests {
             pixel_format: PixelFormat::XRgb,
             bitmap_data: build_progressive_stream(false),
         }));
-        assert!(result.is_err(), "progressive decoder context must not survive DeleteEncodingContext");
+        assert!(
+            result.is_err(),
+            "progressive decoder context must not survive DeleteEncodingContext"
+        );
     }
 
     #[test]
