@@ -21,6 +21,7 @@ fn test_decodes<'a, T: Decode<'a> + PartialEq + core::fmt::Debug>(encoded: &'a [
 }
 
 mod capabilities;
+mod client_listener;
 mod close;
 mod create;
 mod data;

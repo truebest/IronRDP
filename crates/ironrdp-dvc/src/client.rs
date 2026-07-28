@@ -150,6 +150,40 @@ impl DrdynvcClient {
         self.dynamic_channels.register_listener(listener);
     }
 
+    /// Binds a listener whose created channels are discoverable via
+    /// [`DrdynvcClient::get_dvc_by_type_id`] as `T`.
+    ///
+    /// Unlike [`DrdynvcClient::with_dynamic_channel`] — whose processor is consumed by the
+    /// first DYNVC_CREATE_REQ and lost for good once the server closes the channel — the
+    /// listener is called for every DYNVC_CREATE_REQ, so the channel survives server-driven
+    /// close/re-create cycles (gnome-remote-desktop does this to its DisplayControl DVC).
+    ///
+    /// # Note
+    ///
+    /// * The listener must create processors of type `T`, or later
+    ///   `channel_processor_downcast_ref::<T>()` calls will return `None`.
+    /// * If a listener or a pre-registered channel with the same name already exists,
+    ///   it will be silently overwritten.
+    #[must_use]
+    pub fn with_typed_listener<T, L>(mut self, listener: L) -> Self
+    where
+        T: DvcProcessor + 'static,
+        L: DvcChannelListener + 'static,
+    {
+        self.dynamic_channels.register_typed_listener::<T, L>(listener);
+        self
+    }
+
+    /// Attaches a listener with [TypeId] lookup support; see
+    /// [`DrdynvcClient::with_typed_listener`].
+    pub fn attach_typed_listener<T, L>(&mut self, listener: L)
+    where
+        T: DvcProcessor + 'static,
+        L: DvcChannelListener + 'static,
+    {
+        self.dynamic_channels.register_typed_listener::<T, L>(listener);
+    }
+
     pub fn get_dvc_by_type_id<T>(&self) -> Option<&DynamicVirtualChannel>
     where
         T: DvcProcessor,
@@ -276,7 +310,8 @@ impl SvcProcessor for DrdynvcClient {
 
 struct ListenerEntry {
     listener: DynamicChannelListener,
-    /// `Some` only for channels registered via `with_dynamic_channel<T>()`.
+    /// `Some` only for channels registered via `with_dynamic_channel<T>()` or
+    /// `with_typed_listener<T, _>()`.
     type_id: Option<TypeId>,
 }
 
@@ -303,6 +338,17 @@ impl DynamicChannelSet {
             ListenerEntry {
                 listener: Box::new(listener),
                 type_id: None,
+            },
+        );
+    }
+
+    fn register_typed_listener<T: DvcProcessor + 'static, L: DvcChannelListener + 'static>(&mut self, listener: L) {
+        let name = listener.channel_name().to_owned();
+        self.listeners.insert(
+            name,
+            ListenerEntry {
+                listener: Box::new(listener),
+                type_id: Some(TypeId::of::<T>()),
             },
         );
     }

@@ -37,10 +37,7 @@ remains local:
   Share Control PDU (gnome-remote-desktop interleaves more than just DeactivateAll here).
 - `crates/ironrdp-session/Cargo.toml` — connector consumed with `default-features = false`.
 - `crates/ironrdp-egfx/src/client.rs`, `crates/ironrdp-graphics/src/progressive.rs`
-  — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; a
-  `GraphicsPipelineHandler::on_map_surface_to_output` hook (the base dispatcher previously
-  consumed `RDPGFX_MAP_SURFACE_TO_OUTPUT_PDU` internally without exposing it, so a mapped
-  surface's origin couldn't be applied to its bitmap updates); `BitmapUpdate` is no longer
+  — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; `BitmapUpdate` is no longer
   `#[non_exhaustive]` so the sole downstream consumer (`webrdp-min`) can construct it in tests.
   A progressive decode failure in `handle_wire_to_surface2` now propagates as a `PduResult`
   error (matching `decode_avc420`'s behavior) instead of being logged and silently dropped,
@@ -57,6 +54,15 @@ remains local:
   `max_monitor_area()` came out tiny and callback-produced monitor layouts were never sent.
   Upstream master has the same bug (its own `DisplayControlServer` and testsuite golden
   vectors prove the headered shape) — upstream PR candidate.
+- `crates/ironrdp-dvc/src/client.rs` (+ testsuite `tests/dvc/client_listener.rs`) —
+  `with_typed_listener`/`attach_typed_listener`: listener registration that keeps
+  `get_dvc_by_type_id` working across server-driven DVC close/re-create cycles.
+  Upstream's `with_dynamic_channel` consumes its processor on the first
+  DYNVC_CREATE_REQ, so a channel the server closes and re-creates gets NO_LISTENER
+  and typed lookup goes permanently dead — observed live against
+  gnome-remote-desktop, where the DisplayControl channel that served the
+  connect-time layout push is gone from the registry minutes later.
+  Upstream PR candidate.
 
 To see the delta against upstream directly, diff this tree against the base commit above
 (`git diff <base-commit> HEAD -- crates/`).
