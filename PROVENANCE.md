@@ -59,10 +59,8 @@ remains local:
   `get_dvc_by_type_id` working across server-driven DVC close/re-create cycles.
   Upstream's `with_dynamic_channel` consumes its processor on the first
   DYNVC_CREATE_REQ, so a channel the server closes and re-creates gets NO_LISTENER
-  and typed lookup goes permanently dead — observed live against
-  gnome-remote-desktop, where the DisplayControl channel that served the
-  connect-time layout push is gone from the registry minutes later.
-  Upstream PR candidate.
+  and typed lookup goes permanently dead (defensive hardening; the testsuite
+  documents both behaviors). Upstream PR candidate.
 
 To see the delta against upstream directly, diff this tree against the base commit above
 (`git diff <base-commit> HEAD -- crates/`).
