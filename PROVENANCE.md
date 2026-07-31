@@ -31,7 +31,10 @@ remains local:
   connect-time autodetect response, this fork also answers Bandwidth-Measure-Start/
   Payload/Stop with real timing (`process_connect_time_autodetect`), and keeps
   `SUPPORT_DYN_VC_GFX_PROTOCOL` in the early-capability flags so FreeRDP-based servers
-  (gnome-remote-desktop) grant the Graphics Pipeline (EGFX).
+  (gnome-remote-desktop) grant the Graphics Pipeline (EGFX). The connector config also
+  exposes `enable_audio_capture`; when set, Client Info carries `INFO_AUDIOCAPTURE` so
+  gnome-remote-desktop can open the MS-RDPEAI `AUDIO_INPUT` DVC. Other in-tree config
+  constructors explicitly default it off.
 - `crates/ironrdp-connector/src/connection_activation.rs` — broadens upstream's
   DeactivateAll-only tolerance during Capabilities Exchange to skip any non-DemandActive
   Share Control PDU (gnome-remote-desktop interleaves more than just DeactivateAll here).

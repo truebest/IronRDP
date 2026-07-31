@@ -228,6 +228,9 @@ pub struct Config {
     pub autologon: bool,
     /// If true, the INFO_NOAUDIOPLAYBACK flag is set in the [`ClientInfoPdu`](ironrdp_pdu::rdp::ClientInfoPdu)
     pub enable_audio_playback: bool,
+    /// If true, the INFO_AUDIOCAPTURE flag is set in the [`ClientInfoPdu`](ironrdp_pdu::rdp::ClientInfoPdu)
+    /// so the server may open the MS-RDPEAI audio-input dynamic virtual channel.
+    pub enable_audio_capture: bool,
     pub performance_flags: PerformanceFlags,
 
     pub license_cache: Option<Arc<dyn LicenseCache>>,
