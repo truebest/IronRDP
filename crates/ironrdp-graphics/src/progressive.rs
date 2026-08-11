@@ -1136,10 +1136,23 @@ impl ProgressiveDecoder {
 
         let mut decoded_tiles = Vec::new();
 
-        // Process REGION blocks (the main content)
+        // Process REGION blocks only inside the first FRAME_BEGIN/FRAME_END
+        // pair in this bitmap stream. Framing state is local to bitmap_data;
+        // the codec context retains only the cross-frame tile state.
+        let mut in_frame = false;
+        let mut frame_ended = false;
         for block in &blocks {
             let region = match block {
-                ProgressiveBlock::Region(r) => r,
+                ProgressiveBlock::FrameBegin(_) if !frame_ended => {
+                    in_frame = true;
+                    continue;
+                }
+                ProgressiveBlock::FrameEnd(_) => {
+                    in_frame = false;
+                    frame_ended = true;
+                    continue;
+                }
+                ProgressiveBlock::Region(r) if in_frame => r,
                 _ => continue,
             };
 
@@ -1167,6 +1180,15 @@ impl ProgressiveDecoder {
     /// `surface_id` and `codec_context_id`.
     pub fn delete_context(&mut self, surface_id: u16, codec_context_id: u32) {
         self.contexts.remove(&(surface_id, codec_context_id));
+    }
+
+    /// Delete every codec context associated with a surface.
+    ///
+    /// Called when the server deletes a surface so a later surface reusing the
+    /// same ID cannot inherit stale progressive tile state.
+    pub fn delete_surface(&mut self, surface_id: u16) {
+        self.contexts
+            .retain(|(context_surface_id, _), _| *context_surface_id != surface_id);
     }
 
     /// Reset all contexts (e.g., on EGFX channel reset).
@@ -1720,6 +1742,104 @@ mod tests {
         decoder.delete_context(1, 0);
         assert_eq!(decoder.contexts.len(), 1);
         assert!(decoder.contexts.contains_key(&(2, 0)));
+
+        // Deleting a surface removes all of its contexts without disturbing
+        // contexts owned by another surface.
+        assert!(decoder.decode_bitmap(1, 0, 640, 480, &minimal_stream()).is_ok());
+        assert!(decoder.decode_bitmap(1, 1, 640, 480, &minimal_stream()).is_ok());
+        assert_eq!(decoder.contexts.len(), 3);
+
+        decoder.delete_surface(1);
+        assert_eq!(decoder.contexts.len(), 1);
+        assert!(decoder.contexts.contains_key(&(2, 0)));
+    }
+
+    #[test]
+    fn decoder_ignores_regions_outside_frame() {
+        use ironrdp_pdu::codecs::rfx::RfxRectangle;
+        use ironrdp_pdu::codecs::rfx::progressive::{
+            ComponentCodecQuant, ProgressiveBlock, ProgressiveContextPdu, ProgressiveFrameBeginPdu,
+            ProgressiveFrameEndPdu, ProgressiveRegion, ProgressiveSyncPdu, ProgressiveTile, TileSimple,
+            encode_progressive_stream,
+        };
+
+        fn invalid_region() -> ProgressiveRegion<'static> {
+            let base_quant = ComponentCodecQuant {
+                ll3: 6,
+                hl3: 6,
+                lh3: 6,
+                hh3: 6,
+                hl2: 6,
+                lh2: 6,
+                hh2: 6,
+                hl1: 6,
+                lh1: 6,
+                hh1: 6,
+            };
+            ProgressiveRegion {
+                tile_size: 0x40,
+                rects: vec![RfxRectangle {
+                    x: 0,
+                    y: 0,
+                    width: 64,
+                    height: 64,
+                }],
+                quant_vals: vec![base_quant],
+                quant_prog_vals: vec![],
+                flags: 0,
+                tiles: vec![ProgressiveTile::Simple(TileSimple {
+                    quant_idx_y: 0,
+                    quant_idx_cb: 0,
+                    quant_idx_cr: 0,
+                    x_idx: 1,
+                    y_idx: 0,
+                    flags: 0,
+                    y_data: &[],
+                    cb_data: &[],
+                    cr_data: &[],
+                    tail_data: &[],
+                })],
+            }
+        }
+
+        let context = ProgressiveBlock::Context(ProgressiveContextPdu {
+            context_id: 0,
+            tile_size: 0x0040,
+            flags: 0,
+        });
+        let frame_begin = ProgressiveBlock::FrameBegin(ProgressiveFrameBeginPdu {
+            frame_index: 0,
+            region_count: 0,
+        });
+
+        let outside = encode_progressive_stream(&[
+            ProgressiveBlock::Sync(ProgressiveSyncPdu),
+            context.clone(),
+            ProgressiveBlock::Region(invalid_region()),
+            frame_begin.clone(),
+            ProgressiveBlock::FrameEnd(ProgressiveFrameEndPdu),
+            ProgressiveBlock::Region(invalid_region()),
+        ])
+        .unwrap();
+
+        let mut decoder = ProgressiveDecoder::new();
+        let tiles = decoder.decode_bitmap(1, 10, 64, 64, &outside).unwrap();
+        assert!(tiles.is_empty(), "out-of-frame regions must not produce tiles");
+
+        // The same deliberately out-of-bounds REGION must still be decoded,
+        // and fail, when it appears inside the frame.
+        let inside = encode_progressive_stream(&[
+            ProgressiveBlock::Sync(ProgressiveSyncPdu),
+            context,
+            frame_begin,
+            ProgressiveBlock::Region(invalid_region()),
+            ProgressiveBlock::FrameEnd(ProgressiveFrameEndPdu),
+        ])
+        .unwrap();
+        assert!(matches!(
+            decoder.decode_bitmap(1, 11, 64, 64, &inside),
+            Err(ProgressiveDecodeError::TileOutOfBounds { .. })
+        ));
     }
 
     #[test]

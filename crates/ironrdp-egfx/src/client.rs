@@ -268,6 +268,29 @@ pub trait GraphicsPipelineHandler: Send {
     /// and this notification belong to the same logical frame.
     fn on_frame_complete(&mut self, _frame_id: u32) {}
 
+    /// When true, the client does NOT emit FRAME_ACKNOWLEDGE automatically on
+    /// EndFrame. The embedder then builds and sends the acknowledgements itself
+    /// (typically paced to the real consumption rate of its decoder), using the
+    /// channel id from `on_channel_started` and the frame ids from
+    /// `on_frame_complete`. Servers use unacknowledged frames for flow control,
+    /// so a pacing embedder MUST eventually ack every completed frame or the
+    /// server stops sending frames entirely.
+    fn paces_frame_acks(&self) -> bool {
+        false
+    }
+
+    /// Called with the DVC channel id when the EGFX channel starts, before the
+    /// capability advertisement is sent. A pacing embedder needs the id to
+    /// address its own FrameAcknowledge PDUs (see `paces_frame_acks`).
+    fn on_channel_started(&mut self, _channel_id: u32) {}
+
+    /// Called on every RDPGFX_START_FRAME_PDU that carries an available, valid
+    /// server encode timestamp, folded to milliseconds of day, before the frame's
+    /// surface commands are processed. The two clocks are unrelated, so only
+    /// differences between samples carry meaning — enough to watch how far a
+    /// frame's content has aged by the time it reaches the client.
+    fn on_frame_started(&mut self, _server_ms_of_day: u32) {}
+
     /// Called when the EGFX channel is closed
     fn on_close(&mut self) {}
 
@@ -508,6 +531,18 @@ impl GraphicsPipelineClient {
             GfxPdu::StartFrame(start) => {
                 self.current_frame_id = Some(start.frame_id);
                 self.frames_queued = self.frames_queued.saturating_add(1);
+                let ts = &start.timestamp;
+                // MS-RDPEGFX defines the all-zero wire value as unavailable.
+                // Reject out-of-range packed values as well: neither can be used
+                // as a meaningful wall-clock freshness sample.
+                let available = ts.milliseconds != 0 || ts.seconds != 0 || ts.minutes != 0 || ts.hours != 0;
+                let valid = ts.milliseconds < 1000 && ts.seconds < 60 && ts.minutes < 60 && ts.hours < 24;
+                if available && valid {
+                    let server_ms_of_day =
+                        ((u32::from(ts.hours) * 60 + u32::from(ts.minutes)) * 60 + u32::from(ts.seconds)) * 1000
+                            + u32::from(ts.milliseconds);
+                    self.handler.on_frame_started(server_ms_of_day);
+                }
                 trace!(frame_id = start.frame_id, "StartFrame");
                 Ok(vec![])
             }
@@ -699,6 +734,7 @@ impl GraphicsPipelineClient {
     }
 
     fn handle_delete_surface(&mut self, surface_id: u16) {
+        self.progressive_decoder.delete_surface(surface_id);
         if self.surfaces.remove(&surface_id).is_some() {
             debug!(surface_id, "Surface deleted");
             self.handler.on_surface_deleted(surface_id);
@@ -924,6 +960,12 @@ impl GraphicsPipelineClient {
 
         self.handler.on_frame_complete(frame_id);
 
+        if self.handler.paces_frame_acks() {
+            // The embedder acknowledges on its own schedule (see
+            // GraphicsPipelineHandler::paces_frame_acks).
+            return Ok(Vec::new());
+        }
+
         // Per [3.3.5.12]: client MUST send FrameAcknowledge after EndFrame
         let ack = GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
             queue_depth: QueueDepth::from_u32(self.frames_queued),
@@ -943,7 +985,8 @@ impl DvcProcessor for GraphicsPipelineClient {
         CHANNEL_NAME
     }
 
-    fn start(&mut self, _channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+    fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+        self.handler.on_channel_started(channel_id);
         let caps = if self.h264_decoder.is_some() || self.handler.wants_avc420_passthrough() {
             self.handler.capabilities()
         } else {
@@ -1101,6 +1144,57 @@ mod tests {
         fn on_frame_complete(&mut self, _frame_id: u32) {}
         fn on_close(&mut self) {}
         fn on_unhandled_pdu(&mut self, _pdu: &GfxPdu) {}
+    }
+
+    struct TimestampHandler(std::sync::Arc<std::sync::Mutex<Vec<u32>>>);
+
+    impl GraphicsPipelineHandler for TimestampHandler {
+        fn on_frame_started(&mut self, server_ms_of_day: u32) {
+            self.0.lock().unwrap().push(server_ms_of_day);
+        }
+    }
+
+    #[test]
+    fn start_frame_reports_only_available_valid_timestamps() {
+        let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let mut client =
+            GraphicsPipelineClient::new(Box::new(TimestampHandler(std::sync::Arc::clone(&observed))), None);
+
+        for (frame_id, timestamp) in [
+            (
+                1,
+                crate::pdu::Timestamp {
+                    milliseconds: 0,
+                    seconds: 0,
+                    minutes: 0,
+                    hours: 0,
+                },
+            ),
+            (
+                2,
+                crate::pdu::Timestamp {
+                    milliseconds: 0,
+                    seconds: 0,
+                    minutes: 0,
+                    hours: 24,
+                },
+            ),
+            (
+                3,
+                crate::pdu::Timestamp {
+                    milliseconds: 4,
+                    seconds: 3,
+                    minutes: 2,
+                    hours: 1,
+                },
+            ),
+        ] {
+            client
+                .handle_pdu(GfxPdu::StartFrame(crate::pdu::StartFramePdu { timestamp, frame_id }))
+                .unwrap();
+        }
+
+        assert_eq!(*observed.lock().unwrap(), vec![3_723_004]);
     }
 
     #[test]
@@ -1328,6 +1422,49 @@ mod tests {
         assert!(
             result.is_err(),
             "progressive decoder context must not survive DeleteEncodingContext"
+        );
+    }
+
+    #[test]
+    fn delete_surface_clears_progressive_decoder_context() {
+        use crate::pdu::Codec2Type;
+
+        let mut client = GraphicsPipelineClient::new(Box::new(TestHandler), None);
+        let create_surface = || {
+            GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
+                surface_id: 1,
+                width: 640,
+                height: 480,
+                pixel_format: PixelFormat::XRgb,
+            })
+        };
+        client.handle_pdu(create_surface()).unwrap();
+
+        client
+            .handle_pdu(GfxPdu::WireToSurface2(WireToSurface2Pdu {
+                surface_id: 1,
+                codec_id: Codec2Type::RemoteFxProgressive,
+                codec_context_id: 7,
+                pixel_format: PixelFormat::XRgb,
+                bitmap_data: build_progressive_stream(true),
+            }))
+            .unwrap();
+
+        client
+            .handle_pdu(GfxPdu::DeleteSurface(crate::pdu::DeleteSurfacePdu { surface_id: 1 }))
+            .unwrap();
+        client.handle_pdu(create_surface()).unwrap();
+
+        let result = client.handle_pdu(GfxPdu::WireToSurface2(WireToSurface2Pdu {
+            surface_id: 1,
+            codec_id: Codec2Type::RemoteFxProgressive,
+            codec_context_id: 7,
+            pixel_format: PixelFormat::XRgb,
+            bitmap_data: build_progressive_stream(false),
+        }));
+        assert!(
+            result.is_err(),
+            "progressive decoder context must not survive DeleteSurface"
         );
     }
 

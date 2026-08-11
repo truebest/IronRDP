@@ -42,13 +42,18 @@ remains local:
 - `crates/ironrdp-egfx/src/client.rs`, `crates/ironrdp-graphics/src/progressive.rs`
   — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; `BitmapUpdate` is no longer
   `#[non_exhaustive]` so the sole downstream consumer (`webrdp-min`) can construct it in tests.
+  Embedders may opt out of immediate `FrameAcknowledge` replies and receive the EGFX channel
+  id so they can pace acknowledgements to a slower hardware decoder; valid, available
+  `StartFrame` timestamps are also surfaced for relative frame-freshness telemetry.
   A progressive decode failure in `handle_wire_to_surface2` now propagates as a `PduResult`
   error (matching `decode_avc420`'s behavior) instead of being logged and silently dropped,
   which used to leave the session `Active` with a black/stale screen and no error reported.
   `handle_reset_graphics`/`DeleteEncodingContext` now call `ProgressiveDecoder::reset()`/
-  `delete_context()` (already present on the decoder but never wired up), so stale per-context
-  tile state can't survive a graphics reset or an explicit context deletion. `ProgressiveDecodeError`
-  gained `impl core::error::Error` so it can be attached as a `PduError` source.
+  `delete_context()` (already present on the decoder but never wired up), while surface deletion
+  removes every context owned by that surface, so stale tile state cannot survive reset/deletion
+  or surface-id reuse. Progressive regions are decoded only inside their frame boundaries.
+  `ProgressiveDecodeError` gained `impl core::error::Error` so it can be attached as a
+  `PduError` source.
 - `crates/ironrdp-web/{Cargo.toml,src/session.rs}` — upstream reference path (not built
   by `webrdp-min`; kept for parity/provenance).
 - `crates/ironrdp-displaycontrol/src/client.rs` — `DisplayControlClient::process()` decodes
