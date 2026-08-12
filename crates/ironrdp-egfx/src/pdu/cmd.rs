@@ -1640,6 +1640,12 @@ impl RawCapabilitySet {
                     flags: CapabilitiesV104Flags::from_bits_retain(cur.read_u32()),
                 }
             }
+            CapabilityVersion::FRDP_1 => {
+                ensure_size!(in: cur, size: 4);
+                CapabilitySet::Frdp1 {
+                    flags: CapabilitiesFrdp1Flags::from_bits_retain(cur.read_u32()),
+                }
+            }
             CapabilityVersion::V10_7 => {
                 ensure_size!(in: cur, size: 4);
                 CapabilitySet::V10_7 {
@@ -1714,6 +1720,8 @@ pub enum CapabilitySet {
     V10_6 { flags: CapabilitiesV104Flags },
     V10_6Err { flags: CapabilitiesV104Flags },
     V10_7 { flags: CapabilitiesV107Flags },
+    /// Private extension set, see [`CapabilityVersion::FRDP_1`].
+    Frdp1 { flags: CapabilitiesFrdp1Flags },
 }
 
 impl CapabilitySet {
@@ -1731,6 +1739,7 @@ impl CapabilitySet {
             CapabilitySet::V10_6 { .. } => CapabilityVersion::V10_6,
             CapabilitySet::V10_6Err { .. } => CapabilityVersion::V10_6_ERR,
             CapabilitySet::V10_7 { .. } => CapabilityVersion::V10_7,
+            CapabilitySet::Frdp1 { .. } => CapabilityVersion::FRDP_1,
         }
     }
 
@@ -1747,7 +1756,8 @@ impl CapabilitySet {
             | CapabilitySet::V10_5 { .. }
             | CapabilitySet::V10_6 { .. }
             | CapabilitySet::V10_6Err { .. }
-            | CapabilitySet::V10_7 { .. } => 4,
+            | CapabilitySet::V10_7 { .. }
+            | CapabilitySet::Frdp1 { .. } => 4,
         }
     }
 
@@ -1766,6 +1776,7 @@ impl CapabilitySet {
             CapabilitySet::V10_6 { flags } => dst.write_u32(flags.bits()),
             CapabilitySet::V10_6Err { flags } => dst.write_u32(flags.bits()),
             CapabilitySet::V10_7 { flags } => dst.write_u32(flags.bits()),
+            CapabilitySet::Frdp1 { flags } => dst.write_u32(flags.bits()),
         }
         Ok(())
     }
@@ -1801,6 +1812,9 @@ impl CapabilityVersion {
     pub const V10_6: Self = Self(0xa_0600); // [MS-RDPEGFX-errata]
     pub const V10_6_ERR: Self = Self(0xa_0601); // defined similar to FreeRDP to maintain best compatibility
     pub const V10_7: Self = Self(0xa_0701);
+    /// Private extension version, shared with FreeRDP, which uses it for AV1.
+    /// Only meaningful together with a flag naming the extension in use.
+    pub const FRDP_1: Self = Self(0x1_0000);
 
     /// Returns `true` if this version matches one of the constants defined on
     /// `CapabilityVersion`, i.e. one this build knows how to decode into a
@@ -1820,6 +1834,7 @@ impl CapabilityVersion {
                 | Self::V10_6
                 | Self::V10_6_ERR
                 | Self::V10_7
+                | Self::FRDP_1
         )
     }
 }
@@ -1933,6 +1948,30 @@ bitflags! {
         const AVC_DISABLED = 0x20;
         const AVC_THIN_CLIENT = 0x40;
         const SCALEDMAP_DISABLE = 0x80;
+
+        const _ = !0;
+    }
+}
+
+bitflags! {
+    /// Flags of the private extension capability set, see
+    /// [`CapabilityVersion::FRDP_1`].
+    ///
+    /// The set carries no meaning of its own: a peer names the extension it
+    /// wants with a flag, and the server echoes the flags it accepted. The AVC
+    /// flags keep the meaning they have in version 10.7, so a peer can ask for
+    /// HEVC and still fall back to AVC on a server that does not know it.
+    #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+    pub struct CapabilitiesFrdp1Flags: u32  {
+        const SMALL_CACHE = 0x02;
+        const AVC_DISABLED = 0x20;
+        const AVC_THIN_CLIENT = 0x40;
+        /// FreeRDP's AV1 extension, listed so the bits are not reused
+        const AV1_I444_SUPPORTED = 0x1000_0000;
+        const AV1_I444_DISABLED = 0x2000_0000;
+        /// HEVC/H.265 in the AVC420 envelope, under codec id [`Codec1Type::Hevc`]
+        const HEVC_SUPPORTED = 0x4000_0000;
 
         const _ = !0;
     }
@@ -2185,6 +2224,10 @@ impl<'a> Decode<'a> for MapSurfaceToScaledWindowPdu {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Codec1Type {
     Uncompressed = 0x0,
+    /// Private extension: HEVC/H.265, only valid when [`CapabilityVersion::FRDP_1`]
+    /// was negotiated with [`CapabilitiesFrdp1Flags::HEVC_SUPPORTED`]. Unassigned
+    /// in MS-RDPEGFX; FreeRDP took 0x1 for AV1 under the same scheme.
+    Hevc = 0x2,
     RemoteFx = 0x3,
     ClearCodec = 0x8,
     Planar = 0xa,
@@ -2200,6 +2243,7 @@ impl TryFrom<u16> for Codec1Type {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0x0 => Ok(Codec1Type::Uncompressed),
+            0x2 => Ok(Codec1Type::Hevc),
             0x3 => Ok(Codec1Type::RemoteFx),
             0x8 => Ok(Codec1Type::ClearCodec),
             0xa => Ok(Codec1Type::Planar),

@@ -674,6 +674,14 @@ impl CodecCapabilities {
                 small_cache: flags.contains(CapabilitiesV107Flags::SMALL_CACHE),
                 thin_client: flags.contains(CapabilitiesV107Flags::AVC_THIN_CLIENT),
             },
+            // This server encodes no private extension, so only the AVC flags
+            // of the set carry over
+            CapabilitySet::Frdp1 { flags } => Self {
+                avc420: !flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_DISABLED),
+                avc444: !flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_DISABLED),
+                small_cache: flags.contains(crate::pdu::CapabilitiesFrdp1Flags::SMALL_CACHE),
+                thin_client: flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_THIN_CLIENT),
+            },
         }
     }
 }
@@ -692,6 +700,9 @@ fn capability_priority(cap: &CapabilitySet) -> u32 {
         CapabilitySet::V10 { .. } => 4,
         CapabilitySet::V8_1 { .. } => 3,
         CapabilitySet::V8 { .. } => 2,
+        // Last resort: the extensions this set exists for are not implemented
+        // here, so any standard version is a better match
+        CapabilitySet::Frdp1 { .. } => 1,
     }
 }
 
