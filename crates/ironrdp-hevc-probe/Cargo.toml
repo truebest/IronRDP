@@ -1,0 +1,20 @@
+[package]
+name = "ironrdp-hevc-probe"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Reference consumer of the HEVC graphics pipeline extension"
+
+[dependencies]
+ironrdp = { path = "../ironrdp", features = ["connector", "session", "graphics", "dvc", "pdu"] }
+ironrdp-blocking = { path = "../ironrdp-blocking" }
+ironrdp-egfx = { path = "../ironrdp-egfx" }
+ironrdp-graphics = { path = "../ironrdp-graphics" }
+ironrdp-pdu = { path = "../ironrdp-pdu" }
+anyhow = "1"
+pico-args = "0.5"
+sspi = { version = "0.21", features = ["network_client"] }
+tokio-rustls = { version = "0.26", features = ["ring"] }
+tracing = { version = "0.1", features = ["log"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+x509-cert = { version = "0.2", default-features = false, features = ["std"] }
