@@ -35,6 +35,16 @@ remains local:
   exposes `enable_audio_capture`; when set, Client Info carries `INFO_AUDIOCAPTURE` so
   gnome-remote-desktop can open the MS-RDPEAI `AUDIO_INPUT` DVC. Other in-tree config
   constructors explicitly default it off.
+- `crates/ironrdp-egfx` — the HEVC extension: capability version `FRDP_1` (the private
+  version FreeRDP uses for its own AV1 extension) with the flag `0x40000000` naming
+  HEVC, codec id `0x0002` in the AVC420 envelope, and an `on_hevc_frame` passthrough
+  hook. There is no software HEVC decoder here, so an access unit nobody takes is
+  dropped. The crate's own server side parses the set but ranks it last, since it
+  encodes no private extension.
+- `crates/ironrdp-hevc-probe` — a reference consumer of that extension: it advertises
+  HEVC, writes the access units to a file for `ffprobe`/`ffmpeg`, and reports frame
+  pacing. Kept in the fork because it is the only client that can exercise the
+  extension end to end.
 - `crates/ironrdp-connector/src/connection_activation.rs` — broadens upstream's
   DeactivateAll-only tolerance during Capabilities Exchange to skip any non-DemandActive
   Share Control PDU (gnome-remote-desktop interleaves more than just DeactivateAll here).
