@@ -42,6 +42,10 @@ remains local:
 - `crates/ironrdp-egfx/src/client.rs`, `crates/ironrdp-graphics/src/progressive.rs`
   — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; `BitmapUpdate` is no longer
   `#[non_exhaustive]` so the sole downstream consumer (`webrdp-min`) can construct it in tests.
+  The EGFX client also selectively backports upstream commit `66c8a81be0a9f966e3cf4935ca2a0274d10b063f`
+  to decode `WireToSurface1` RDP 6.0 Planar bitmaps through the existing RDP6 decoder and
+  publish them as RGBA updates; this is a focused backport, not a rebase onto that upstream
+  revision.
   A progressive decode failure in `handle_wire_to_surface2` now propagates as a `PduResult`
   error (matching `decode_avc420`'s behavior) instead of being logged and silently dropped,
   which used to leave the session `Active` with a black/stale screen and no error reported.
