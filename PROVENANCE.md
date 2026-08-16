@@ -39,6 +39,10 @@ remains local:
   DeactivateAll-only tolerance during Capabilities Exchange to skip any non-DemandActive
   Share Control PDU (gnome-remote-desktop interleaves more than just DeactivateAll here).
 - `crates/ironrdp-session/Cargo.toml` — connector consumed with `default-features = false`.
+- `crates/ironrdp-session/src/{fast_path.rs,image.rs}` — selectively backports upstream
+  commit `80bb81b344dba0197aa7b870c685f398dc4bcaee` so decoded bitmap source stride and
+  row order remain independent of the visible destination rectangle. This prevents padded
+  RDP6 rows from producing diagonal striping on xrdp's login screen.
 - `crates/ironrdp-egfx/src/client.rs`, `crates/ironrdp-graphics/src/progressive.rs`
   — `WireToSurface2` RemoteFX-Progressive decode → RGBA tiles; `BitmapUpdate` is no longer
   `#[non_exhaustive]` so the sole downstream consumer (`webrdp-min`) can construct it in tests.
