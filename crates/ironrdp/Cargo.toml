@@ -79,6 +79,8 @@ ironrdp-client = { path = "../ironrdp-client", version = "0.1", optional = true 
 ironrdp-vmconnect = { path = "../ironrdp-vmconnect", version = "0.1", optional = true } # public
 
 [dev-dependencies]
+ironrdp-egfx = { path = "../ironrdp-egfx", version = "0.3" }
+ironrdp-dvc = { path = "../ironrdp-dvc", version = "0.8" }
 ironrdp-blocking = { path = "../ironrdp-blocking", version = "0.10" }
 ironrdp-cliprdr-native = { path = "../ironrdp-cliprdr-native", version = "0.7" }
 anyhow = "1"
