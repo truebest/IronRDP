@@ -2424,6 +2424,23 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_surface_releases_its_retained_context_flag() {
+        let mut decoder = ProgressiveDecoder::new();
+        let with_context = minimal_progressive_stream(true);
+        let without_context = minimal_progressive_stream(false);
+
+        assert!(decoder.decode_bitmap(1, 0, 640, 480, &with_context).is_ok());
+        // A new context id on the same surface inherits the retained layout.
+        assert!(decoder.decode_bitmap(1, 1, 640, 480, &without_context).is_ok());
+
+        decoder.delete_surface(1);
+        assert!(matches!(
+            decoder.decode_bitmap(1, 2, 640, 480, &without_context),
+            Err(ProgressiveDecodeError::MissingBlock("CONTEXT"))
+        ));
+    }
+
+    #[test]
     fn decoder_error_display() {
         let e = ProgressiveDecodeError::MissingBlock("SYNC");
         assert!(e.to_string().contains("SYNC"));

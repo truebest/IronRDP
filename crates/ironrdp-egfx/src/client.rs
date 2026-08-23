@@ -69,12 +69,15 @@ use crate::CHANNEL_NAME;
 use crate::compositor::{Compositor, OutputUpdate};
 use crate::decode::H264Decoder;
 use crate::pdu::{
-    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, Encoding, CacheToSurfacePdu, CapabilitiesAdvertisePdu, CapabilitiesV8Flags,
-    CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet, Codec1Type, DeleteEncodingContextPdu,
-    EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu,
-    MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu, SurfaceToCachePdu,
-    SurfaceToSurfacePdu, WireToSurface2Pdu,
+    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesAdvertisePdu,
+    CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet, Codec1Type,
+    DeleteEncodingContextPdu, Encoding, EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToScaledOutputPdu,
+    MapSurfaceToScaledWindowPdu, MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu,
+    SurfaceToCachePdu, SurfaceToSurfacePdu, WireToSurface2Pdu,
 };
+
+/// Consecutive undecodable Progressive payloads that force the decoder's state to be dropped.
+const MAX_PROGRESSIVE_FAILURES_IN_A_ROW: u64 = 16;
 
 /// Max capacity to keep for decompressed buffer when cleared.
 const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 16384; // 16 KiB
@@ -453,6 +456,8 @@ pub struct GraphicsPipelineClient {
     clearcodec_decoder: Option<ClearCodecDecoder>,
     planar_decoder: BitmapStreamDecoder,
     progressive_decoder: ProgressiveDecoder,
+    progressive_failures: u64,
+    progressive_failures_in_a_row: u64,
 
     decompressor: zgfx::Decompressor,
     decompressed_buffer: Vec<u8>,
@@ -482,6 +487,8 @@ impl GraphicsPipelineClient {
             clearcodec_decoder: None,
             planar_decoder: BitmapStreamDecoder::default(),
             progressive_decoder: ProgressiveDecoder::new(),
+            progressive_failures: 0,
+            progressive_failures_in_a_row: 0,
             decompressor: zgfx::Decompressor::new(),
             decompressed_buffer: Vec::new(),
             state: ClientState::WaitingForConfirm,
@@ -900,19 +907,47 @@ impl GraphicsPipelineClient {
             .ok_or_else(|| pdu_other_err!("unknown surface in WireToSurface2"))?;
         let (surface_width, surface_height) = (surface.width, surface.height);
 
-        let tiles = self
-            .progressive_decoder
-            .decode_bitmap(
-                pdu.surface_id,
-                pdu.codec_context_id,
-                surface_width,
-                surface_height,
-                &pdu.bitmap_data,
-            )
-            .map_err(|error| {
-                warn!(?error, "rfx progressive decode failed");
-                pdu_other_err!("rfx progressive decode failed")
-            })?;
+        // A payload this client cannot decode costs the tiles it carried, which the next
+        // update repaints; ending the session over it costs the session. Tile state is
+        // unchanged on failure, so later payloads still decode against valid coefficients.
+        let tiles = match self.progressive_decoder.decode_bitmap(
+            pdu.surface_id,
+            pdu.codec_context_id,
+            surface_width,
+            surface_height,
+            &pdu.bitmap_data,
+        ) {
+            Ok(tiles) => {
+                self.progressive_failures_in_a_row = 0;
+                tiles
+            }
+            Err(error) => {
+                self.progressive_failures = self.progressive_failures.saturating_add(1);
+                self.progressive_failures_in_a_row = self.progressive_failures_in_a_row.saturating_add(1);
+                if self.progressive_failures == 1 || self.progressive_failures.is_multiple_of(64) {
+                    warn!(
+                        ?error,
+                        surface_id = pdu.surface_id,
+                        codec_context_id = pdu.codec_context_id,
+                        bytes = pdu.bitmap_data.len(),
+                        skipped_total = self.progressive_failures,
+                        "skipping undecodable RFX Progressive payload"
+                    );
+                }
+                // Skipping forever would leave a frozen region with no way back. FreeRDP
+                // closes the graphics channel so the server rebuilds it; drop the codec
+                // state instead, which is the part a rebuild would have cleared.
+                if self.progressive_failures_in_a_row >= MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+                    warn!(
+                        failures = self.progressive_failures_in_a_row,
+                        "resetting RFX Progressive decoder state"
+                    );
+                    self.progressive_failures_in_a_row = 0;
+                    self.progressive_decoder.reset();
+                }
+                return Ok(());
+            }
+        };
 
         for tile in tiles {
             let tile_left = tile.x_idx.saturating_mul(TILE_DIM);
@@ -2243,11 +2278,34 @@ mod tests {
         assert!(client.drain_output().is_empty());
     }
 
+    /// An undecodable payload is skipped, so the session survives it; the decoder's own
+    /// tests cover which state each teardown releases.
     fn assert_progressive_context_is_deleted(clear: impl FnOnce(&mut GraphicsPipelineClient)) {
         let mut client = progressive_client();
         wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
         clear(&mut client);
-        assert!(wire_progressive(&mut client, progressive_context_stream(false)).is_err());
+        assert!(wire_progressive(&mut client, progressive_context_stream(false)).is_ok());
+    }
+
+    #[test]
+    fn repeated_progressive_failures_drop_the_decoder_state() {
+        let mut client = progressive_client();
+        wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
+
+        // Undecodable payloads are skipped, never fatal.
+        for _ in 0..MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+            assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
+        }
+        assert_eq!(client.progressive_failures, MAX_PROGRESSIVE_FAILURES_IN_A_ROW);
+        assert_eq!(client.progressive_failures_in_a_row, 0);
+
+        // The context established before the failures is gone, so a continuation that
+        // relies on it decodes from scratch rather than against stale tiles.
+        assert!(wire_progressive(&mut client, progressive_context_stream(false)).is_ok());
+
+        // A decodable payload clears the streak.
+        wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
+        assert_eq!(client.progressive_failures_in_a_row, 0);
     }
 
     #[test]

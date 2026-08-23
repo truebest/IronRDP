@@ -315,7 +315,10 @@ fn connect(
 
     let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
 
-    let mut connector = connector::ClientConnector::new(config, client_addr);
+    let mut connector = connector::ClientConnector::new(config, client_addr)
+        .with_static_channel(ironrdp_dvc::DrdynvcClient::new().with_dynamic_channel(
+            ironrdp_egfx::client::GraphicsPipelineClient::new(Box::new(Avc444Probe), None),
+        ));
 
     let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("begin connection")?;
 
@@ -363,7 +366,32 @@ fn active_stage(
     }
     .build();
 
+    let started = std::time::Instant::now();
+    let mut next_move = std::time::Duration::from_millis(0);
+    let mut x = 200u16;
+
     'outer: loop {
+        // Windows sends nothing while the desktop is idle; nudge the pointer so it encodes.
+        if started.elapsed() >= next_move {
+            next_move = started.elapsed() + std::time::Duration::from_millis(250);
+            x = if x > 1200 { 200 } else { x + 40 };
+            let event = ironrdp::pdu::input::fast_path::FastPathInputEvent::MouseEvent(
+                ironrdp::pdu::input::MousePdu {
+                    flags: ironrdp::pdu::input::mouse::PointerFlags::MOVE,
+                    number_of_wheel_rotation_units: 0,
+                    x_position: x,
+                    y_position: 400,
+                },
+            );
+            if let Ok(outputs) = active_stage.process_fastpath_input(image, &[event]) {
+                for out in outputs {
+                    if let ActiveStageOutput::ResponseFrame(frame) = out {
+                        framed.write_all(&frame).context("write input")?;
+                    }
+                }
+            }
+        }
+
         let (action, payload) = match framed.read_pdu() {
             Ok((action, payload)) => (action, payload),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break 'outer,
@@ -372,7 +400,13 @@ fn active_stage(
 
         trace!(?action, frame_length = payload.len(), "Frame received");
 
-        let outputs = active_stage.process(image, action, &payload)?;
+        let outputs = match active_stage.process(image, action, &payload) {
+            Ok(outputs) => outputs,
+            Err(e) => {
+                println!("process error (continuing): {e}");
+                continue;
+            }
+        };
 
         for out in outputs {
             match out {
@@ -509,5 +543,75 @@ mod danger {
                 SignatureScheme::ED448,
             ]
         }
+    }
+}
+
+struct Avc444Probe;
+
+fn summarize_nals(data: &[u8]) -> String {
+    // Annex B: report each NAL's type and nal_ref_idc.
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + 3 < data.len() {
+        let start = if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            i + 3
+        } else if i + 4 < data.len() && data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 0 && data[i + 3] == 1 {
+            i + 4
+        } else {
+            i += 1;
+            continue;
+        };
+        let header = data[start];
+        let nal_type = header & 0x1F;
+        let ref_idc = (header >> 5) & 0x03;
+        let name = match nal_type {
+            1 => "slice",
+            5 => "IDR",
+            6 => "SEI",
+            7 => "SPS",
+            8 => "PPS",
+            9 => "AUD",
+            other => return format!("{out:?} +type{other}"),
+        };
+        out.push(format!("{name}/ref{ref_idc}"));
+        i = start + 1;
+    }
+    out.join(" ")
+}
+
+impl ironrdp_egfx::client::GraphicsPipelineHandler for Avc444Probe {
+    fn capabilities(&self) -> Vec<ironrdp_egfx::pdu::CapabilitySet> {
+        vec![ironrdp_egfx::pdu::CapabilitySet::V10_7 {
+            flags: ironrdp_egfx::pdu::CapabilitiesV107Flags::SMALL_CACHE,
+        }]
+    }
+
+    fn wants_avc420_passthrough(&self) -> bool {
+        println!("EGFX: capabilities requested");
+        true
+    }
+
+    fn on_capabilities_confirmed(&mut self, caps: &ironrdp_egfx::pdu::CapabilitySet) {
+        println!("EGFX: confirmed {caps:?}");
+    }
+
+    fn on_unhandled_pdu(&mut self, pdu: &ironrdp_egfx::pdu::GfxPdu) {
+        if let ironrdp_egfx::pdu::GfxPdu::WireToSurface1(w) = pdu {
+            println!("EGFX: unhandled WireToSurface1 codec={:?}", w.codec_id);
+        }
+    }
+
+    fn on_bitmap_updated(&mut self, u: &ironrdp_egfx::client::BitmapUpdate) {
+        println!("EGFX: bitmap {:?} {}x{}", u.codec_id, u.width, u.height);
+    }
+
+    fn on_avc420_frame(&mut self, _s: u16, _l: u16, _t: u16, _w: u16, _h: u16, nal: &[u8]) -> bool {
+        println!("main  ({:>6} B): {}", nal.len(), summarize_nals(nal));
+        true
+    }
+
+    fn on_avc444_aux_frame(&mut self, nal: &[u8]) -> bool {
+        println!("chroma({:>6} B): {}", nal.len(), summarize_nals(nal));
+        true
     }
 }
