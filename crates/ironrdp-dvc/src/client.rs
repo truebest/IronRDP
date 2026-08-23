@@ -229,6 +229,37 @@ impl DrdynvcClient {
         self.dynamic_channels.register_listener(listener);
     }
 
+    /// Binds a listener whose created channels are discoverable as `T` via
+    /// [`DrdynvcClient::get_dvc`].
+    ///
+    /// Unlike [`DrdynvcClient::with_dynamic_channel`], whose processor is consumed by the
+    /// first DYNVC_CREATE_REQ, the listener runs for every DYNVC_CREATE_REQ, so the channel
+    /// survives server-driven close/re-create cycles.
+    ///
+    /// # Note
+    ///
+    /// * The listener must create processors of type `T`, or the lookup returns `None`.
+    /// * A listener or pre-registered channel with the same name is silently overwritten.
+    #[must_use]
+    pub fn with_typed_listener<T, L>(mut self, listener: L) -> Self
+    where
+        T: DvcProcessor + 'static,
+        L: DvcChannelListener + 'static,
+    {
+        self.dynamic_channels.register_typed_listener::<T, L>(listener);
+        self
+    }
+
+    /// Attaches a listener with [TypeId] lookup support; see
+    /// [`DrdynvcClient::with_typed_listener`].
+    pub fn attach_typed_listener<T, L>(&mut self, listener: L)
+    where
+        T: DvcProcessor + 'static,
+        L: DvcChannelListener + 'static,
+    {
+        self.dynamic_channels.register_typed_listener::<T, L>(listener);
+    }
+
     /// Returns a typed accessor for a pre-registered client DVC.
     ///
     /// Type lookup is available only for channels registered with
@@ -544,6 +575,17 @@ impl DynamicChannelSet {
             ListenerEntry {
                 listener: Box::new(listener),
                 type_id: None,
+            },
+        );
+    }
+
+    fn register_typed_listener<T: DvcProcessor + 'static, L: DvcChannelListener + 'static>(&mut self, listener: L) {
+        let name = listener.channel_name().to_owned();
+        self.listeners.insert(
+            name,
+            ListenerEntry {
+                listener: Box::new(listener),
+                type_id: Some(TypeId::of::<T>()),
             },
         );
     }

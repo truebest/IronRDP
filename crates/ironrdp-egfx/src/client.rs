@@ -69,7 +69,7 @@ use crate::CHANNEL_NAME;
 use crate::compositor::{Compositor, OutputUpdate};
 use crate::decode::H264Decoder;
 use crate::pdu::{
-    Avc420BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesAdvertisePdu, CapabilitiesV8Flags,
+    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, Encoding, CacheToSurfacePdu, CapabilitiesAdvertisePdu, CapabilitiesV8Flags,
     CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet, Codec1Type, DeleteEncodingContextPdu,
     EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu,
     MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu, SurfaceToCachePdu,
@@ -207,6 +207,27 @@ pub struct BitmapUpdate {
     pub width: u16,
     /// Height of the decoded data in pixels
     pub height: u16,
+}
+
+impl BitmapUpdate {
+    /// Build an update; `data` must hold `width * height * 4` RGBA bytes.
+    pub fn new(
+        surface_id: u16,
+        destination_rectangle: ExclusiveRectangle,
+        codec_id: Codec1Type,
+        data: Vec<u8>,
+        width: u16,
+        height: u16,
+    ) -> Self {
+        Self {
+            surface_id,
+            destination_rectangle,
+            codec_id,
+            data,
+            width,
+            height,
+        }
+    }
 }
 
 // ============================================================================
@@ -349,6 +370,33 @@ pub trait GraphicsPipelineHandler: Send {
     ///
     /// [MS-RDPEGFX 3.3.5.2]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/9791fc34-7644-4279-844f-7728ae9959c2
     fn on_wire_to_surface2(&mut self, _pdu: &WireToSurface2Pdu) {}
+
+    /// Called for each AVC420 frame before the built-in software decode. `nal` is the raw
+    /// H.264 bitstream; return `true` to take ownership and skip the software decode.
+    fn on_avc420_frame(
+        &mut self,
+        _surface_id: u16,
+        _left: u16,
+        _top: u16,
+        _width: u16,
+        _height: u16,
+        _nal: &[u8],
+    ) -> bool {
+        false
+    }
+
+    /// Called for the chroma view of an AVC444 frame, which carries no picture of its own.
+    /// It shares one H.264 sequence with the YUV420 view, so a handler that takes ownership
+    /// must submit it to the same decoder and discard the output.
+    fn on_avc444_aux_frame(&mut self, _nal: &[u8]) -> bool {
+        false
+    }
+
+    /// Advertise AVC420 capabilities even without a software decoder, because
+    /// [`Self::on_avc420_frame`] decodes the bitstream elsewhere.
+    fn wants_avc420_passthrough(&self) -> bool {
+        false
+    }
 
     /// Called when the server deletes a progressive encoding context
     ///
@@ -823,8 +871,7 @@ impl GraphicsPipelineClient {
                 self.decode_avc420(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data)?;
             }
             Codec1Type::Avc444 | Codec1Type::Avc444v2 => {
-                debug!("AVC444 codec not yet implemented, forwarding to handler");
-                self.handler.on_unhandled_pdu(&GfxPdu::WireToSurface1(pdu));
+                self.decode_avc444(pdu)?;
             }
             Codec1Type::ClearCodec => {
                 self.decode_clearcodec(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data)?;
@@ -933,9 +980,66 @@ impl GraphicsPipelineClient {
         Ok(())
     }
 
+    /// Decode an AVC444 bitmap stream ([MS-RDPEGFX] 2.2.4.5) through the AVC420 path.
+    ///
+    /// Both views share one H.264 sequence and its reference state, so both reach the decoder
+    /// in wire order; only the YUV420 view is presented. `LC` selects which views are present:
+    /// `0` both, `1` YUV420 only, `2` chroma only.
+    fn decode_avc444(&mut self, pdu: crate::pdu::WireToSurface1Pdu) -> PduResult<()> {
+        let mut cursor = ReadCursor::new(&pdu.bitmap_data);
+        let stream = Avc444BitmapStream::decode(&mut cursor).map_err(|e| decode_err!(e))?;
+
+        if stream.encoding == Encoding::CHROMA {
+            return self.decode_avc444_aux(stream.stream1.data);
+        }
+
+        self.decode_avc420_stream(pdu.surface_id, &pdu.destination_rectangle, stream.stream1.data)?;
+
+        if let Some(aux) = stream.stream2 {
+            self.decode_avc444_aux(aux.data)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode_avc444_aux(&mut self, h264_data: &[u8]) -> PduResult<()> {
+        if self.handler.on_avc444_aux_frame(h264_data) {
+            return Ok(());
+        }
+
+        let Some(ref mut decoder) = self.h264_decoder else {
+            return Ok(());
+        };
+
+        decoder
+            .decode(h264_data)
+            .map(|_| ())
+            .map_err(|e| pdu_other_err!("AVC444 chroma view decode", source: e))
+    }
+
     fn decode_avc420(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
         let mut cursor = ReadCursor::new(bitmap_data);
         let stream = Avc420BitmapStream::decode(&mut cursor).map_err(|e| decode_err!(e))?;
+
+        self.decode_avc420_stream(surface_id, dest_rect, stream.data)
+    }
+
+    fn decode_avc420_stream(
+        &mut self,
+        surface_id: u16,
+        dest_rect: &ExclusiveRectangle,
+        h264_data: &[u8],
+    ) -> PduResult<()> {
+        if self.handler.on_avc420_frame(
+            surface_id,
+            dest_rect.left,
+            dest_rect.top,
+            dest_rect.right - dest_rect.left,
+            dest_rect.bottom - dest_rect.top,
+            h264_data,
+        ) {
+            return Ok(());
+        }
 
         let Some(ref mut decoder) = self.h264_decoder else {
             debug!("No H.264 decoder configured, skipping AVC420 frame");
@@ -943,7 +1047,7 @@ impl GraphicsPipelineClient {
         };
 
         let frame = decoder
-            .decode(stream.data)
+            .decode(h264_data)
             .map_err(|e| pdu_other_err!("H.264 decode", source: e))?;
 
         // MS-RDPEGFX 2.2.1.4.1: RDPGFX_RECT16 right/bottom are exclusive (one-past-end),
@@ -1120,7 +1224,7 @@ impl DvcProcessor for GraphicsPipelineClient {
     }
 
     fn start(&mut self, _channel_id: u32) -> PduResult<Vec<DvcMessage>> {
-        let caps = if self.h264_decoder.is_some() {
+        let caps = if self.h264_decoder.is_some() || self.handler.wants_avc420_passthrough() {
             self.handler.capabilities()
         } else {
             // No H.264 decoder: filter out capability sets that imply AVC support.
