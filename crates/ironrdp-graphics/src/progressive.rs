@@ -1325,6 +1325,50 @@ impl ProgressiveDecoder {
         surface_height: u16,
         bitmap_data: &[u8],
     ) -> Result<Vec<DecodedTile>, ProgressiveDecodeError> {
+        let (tiles, error) =
+            self.decode_bitmap_partial(surface_id, codec_context_id, surface_width, surface_height, bitmap_data);
+        match error {
+            Some(error) => Err(error),
+            None => Ok(tiles),
+        }
+    }
+
+    /// Decode as [`Self::decode_bitmap`] does, but keep the tiles that decoded before a
+    /// failure instead of dropping them with the rest of the payload.
+    ///
+    /// Every decoded tile advances the codec context's stored coefficients and the
+    /// surface's difference references. Discarding one leaves that state describing pixels
+    /// the caller never received, so each later difference tile refines an image that was
+    /// never presented.
+    pub fn decode_bitmap_partial(
+        &mut self,
+        surface_id: u16,
+        codec_context_id: u32,
+        surface_width: u16,
+        surface_height: u16,
+        bitmap_data: &[u8],
+    ) -> (Vec<DecodedTile>, Option<ProgressiveDecodeError>) {
+        let mut tiles = Vec::new();
+        let outcome = self.decode_bitmap_into(
+            &mut tiles,
+            surface_id,
+            codec_context_id,
+            surface_width,
+            surface_height,
+            bitmap_data,
+        );
+        (tiles, outcome.err())
+    }
+
+    fn decode_bitmap_into(
+        &mut self,
+        decoded_tiles: &mut Vec<DecodedTile>,
+        surface_id: u16,
+        codec_context_id: u32,
+        surface_width: u16,
+        surface_height: u16,
+        bitmap_data: &[u8],
+    ) -> Result<(), ProgressiveDecodeError> {
         use ironrdp_pdu::codecs::rfx::progressive::{ProgressiveBlock, decode_progressive_stream};
 
         let blocks = decode_progressive_stream(bitmap_data)?;
@@ -1393,7 +1437,6 @@ impl ProgressiveDecoder {
             frame_tiles.clear();
         }
 
-        let mut decoded_tiles = Vec::new();
         let mut region_clipping_work = 0;
 
         // Process REGION blocks only inside the first FRAME_BEGIN/FRAME_END
@@ -1511,7 +1554,7 @@ impl ProgressiveDecoder {
             self.frame_tiles.clear();
         }
 
-        Ok(decoded_tiles)
+        Ok(())
     }
 
     /// Delete a codec context, freeing its progressive tile state.
@@ -3289,6 +3332,73 @@ mod tests {
         ]);
 
         encode_progressive_stream(&blocks).expect("synthetic progressive stream should encode")
+    }
+
+    /// A payload whose second region fails must still deliver the first region's tile:
+    /// that tile already advanced the decoder's stored coefficients, so withholding it
+    /// would leave later difference tiles refining pixels the caller never received.
+    #[test]
+    fn partial_decode_keeps_the_tiles_decoded_before_a_failure() {
+        use ironrdp_pdu::codecs::rfx::RfxRectangle;
+        use ironrdp_pdu::codecs::rfx::progressive::{
+            ProgressiveBlock, ProgressiveContextPdu, ProgressiveFrameBeginPdu, ProgressiveFrameEndPdu,
+            ProgressiveRegion, ProgressiveSyncPdu, ProgressiveTile, TileSimple, encode_progressive_stream,
+        };
+
+        let component_data = [64i16, 0, 0].map(encode_full_quality_component);
+        let region = |x_idx: u16| ProgressiveRegion {
+            tile_size: 0x40,
+            rects: vec![RfxRectangle {
+                x: 0,
+                y: 0,
+                width: 64,
+                height: 64,
+            }],
+            quant_vals: vec![ComponentCodecQuant::LOSSLESS],
+            quant_prog_vals: vec![],
+            flags: 0,
+            tiles: vec![ProgressiveTile::Simple(TileSimple {
+                quant_idx_y: 0,
+                quant_idx_cb: 0,
+                quant_idx_cr: 0,
+                // A 64x64 surface holds one tile, so x_idx 1 is out of bounds.
+                x_idx,
+                y_idx: 0,
+                flags: 0,
+                y_data: &component_data[0],
+                cb_data: &component_data[1],
+                cr_data: &component_data[2],
+                tail_data: &[],
+            })],
+        };
+
+        let stream = encode_progressive_stream(&[
+            ProgressiveBlock::Sync(ProgressiveSyncPdu),
+            ProgressiveBlock::Context(ProgressiveContextPdu {
+                context_id: 0,
+                tile_size: 0x0040,
+                flags: 0,
+            }),
+            ProgressiveBlock::FrameBegin(ProgressiveFrameBeginPdu {
+                frame_index: 0,
+                region_count: 2,
+            }),
+            ProgressiveBlock::Region(region(0)),
+            ProgressiveBlock::Region(region(1)),
+            ProgressiveBlock::FrameEnd(ProgressiveFrameEndPdu),
+        ])
+        .expect("synthetic progressive stream should encode");
+
+        let (tiles, error) = ProgressiveDecoder::new().decode_bitmap_partial(1, 10, 64, 64, &stream);
+        assert!(
+            matches!(error, Some(ProgressiveDecodeError::TileOutOfBounds { .. })),
+            "the second region must fail"
+        );
+        assert_eq!(tiles.len(), 1, "the first region's tile must survive the failure");
+        assert_eq!((tiles[0].x_idx, tiles[0].y_idx), (0, 0));
+
+        // The all-or-nothing entry point keeps its contract for callers that want it.
+        assert!(ProgressiveDecoder::new().decode_bitmap(1, 10, 64, 64, &stream).is_err());
     }
 
     fn simple_tile_stream(flags: u8, components: [i16; 3], include_context: bool) -> Vec<u8> {
