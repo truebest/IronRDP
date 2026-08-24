@@ -79,6 +79,10 @@ use crate::pdu::{
 /// Consecutive undecodable Progressive payloads that force the decoder's state to be dropped.
 const MAX_PROGRESSIVE_FAILURES_IN_A_ROW: u64 = 16;
 
+/// Decoder resets that produced no decodable payload before the stream is reported
+/// undecodable to the handler.
+const MAX_PROGRESSIVE_RESETS_WITHOUT_PROGRESS: u64 = 2;
+
 /// Max capacity to keep for decompressed buffer when cleared.
 const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 16384; // 16 KiB
 
@@ -465,6 +469,7 @@ pub struct GraphicsPipelineClient {
     progressive_decoder: ProgressiveDecoder,
     progressive_failures: u64,
     progressive_failures_in_a_row: u64,
+    progressive_resets_without_progress: u64,
 
     decompressor: zgfx::Decompressor,
     decompressed_buffer: Vec<u8>,
@@ -501,6 +506,7 @@ impl GraphicsPipelineClient {
             progressive_decoder: ProgressiveDecoder::new(),
             progressive_failures: 0,
             progressive_failures_in_a_row: 0,
+            progressive_resets_without_progress: 0,
             decompressor: zgfx::Decompressor::new(),
             decompressed_buffer: Vec::new(),
             state: ClientState::WaitingForConfirm,
@@ -931,6 +937,7 @@ impl GraphicsPipelineClient {
         ) {
             Ok(tiles) => {
                 self.progressive_failures_in_a_row = 0;
+                self.progressive_resets_without_progress = 0;
                 tiles
             }
             Err(error) => {
@@ -955,7 +962,17 @@ impl GraphicsPipelineClient {
                         "resetting RFX Progressive decoder state"
                     );
                     self.progressive_failures_in_a_row = 0;
+                    self.progressive_resets_without_progress =
+                        self.progressive_resets_without_progress.saturating_add(1);
                     self.progressive_decoder.reset();
+                }
+                // Resets that never yield a decodable payload mean the stream itself is
+                // unusable, not the decoder state. A server with no other codec would
+                // otherwise hold a session that renders nothing, so hand the payload to the
+                // handler and let it decide, the route unsupported codecs already take.
+                if self.progressive_resets_without_progress >= MAX_PROGRESSIVE_RESETS_WITHOUT_PROGRESS {
+                    self.progressive_resets_without_progress = 0;
+                    self.handler.on_unhandled_pdu(&GfxPdu::WireToSurface2(pdu));
                 }
                 return Ok(());
             }
@@ -2318,6 +2335,49 @@ mod tests {
         // A decodable payload clears the streak.
         wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
         assert_eq!(client.progressive_failures_in_a_row, 0);
+    }
+
+    #[test]
+    fn progressive_stream_that_never_decodes_reaches_the_handler() {
+        let unhandled = Arc::new(Mutex::new(0));
+        let mut client = GraphicsPipelineClient::new(
+            Box::new(CapturingHandler {
+                updates: Arc::new(Mutex::new(Vec::new())),
+                unhandled: Arc::clone(&unhandled),
+            }),
+            None,
+        );
+        client
+            .handle_pdu(GfxPdu::ResetGraphics(crate::pdu::ResetGraphicsPdu {
+                width: 64,
+                height: 64,
+                monitors: vec![],
+            }))
+            .unwrap();
+        client
+            .handle_pdu(GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
+                surface_id: 1,
+                width: 64,
+                height: 64,
+                pixel_format: PixelFormat::XRgb,
+            }))
+            .unwrap();
+
+        // Failures short of a full reset streak stay invisible to the handler.
+        for _ in 0..MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+            assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
+        }
+        assert_eq!(*unhandled.lock().expect("unhandled lock"), 0);
+
+        // A second reset without a single decodable payload reports the stream instead.
+        for _ in 0..MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+            assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
+        }
+        assert_eq!(*unhandled.lock().expect("unhandled lock"), 1);
+
+        // A decodable payload clears the streak, so the next one starts from scratch.
+        wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
+        assert_eq!(client.progressive_resets_without_progress, 0);
     }
 
     #[test]
