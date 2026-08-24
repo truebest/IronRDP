@@ -134,8 +134,11 @@ struct CachedTile {
 /// output regions that change. The
 /// [`GraphicsPipelineClient`](crate::client::GraphicsPipelineClient) feeds it each
 /// command and drains completed frames via [`drain_output`](Self::drain_output).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub(crate) struct Compositor {
+    /// Ceiling for `allocated_bytes`; zero makes every allocation refuse, which turns
+    /// every command into a no-op (see [`Compositor::inert`]).
+    budget: usize,
     surfaces: BTreeMap<u16, Surface>,
     cache: BTreeMap<u16, CachedTile>,
     /// Pixel bytes currently held across `surfaces`, `cache` and `ready`, charged
@@ -151,13 +154,40 @@ pub(crate) struct Compositor {
     ready: Vec<OutputUpdate>,
 }
 
+impl Default for Compositor {
+    fn default() -> Self {
+        Self::with_budget(MAX_COMPOSITOR_BYTES)
+    }
+}
+
 impl Compositor {
+    fn with_budget(budget: usize) -> Self {
+        Self {
+            budget,
+            surfaces: BTreeMap::new(),
+            cache: BTreeMap::new(),
+            allocated_bytes: 0,
+            output_width: 0,
+            output_height: 0,
+            frame: Vec::new(),
+            ready: Vec::new(),
+        }
+    }
+
+    /// A compositor that holds no pixels: for consumers that render from the
+    /// [`GraphicsPipelineHandler`](crate::client::GraphicsPipelineHandler) callbacks
+    /// and never drain composited output, for which the surface copies are pure
+    /// overhead — a single 4K surface alone costs 33 MB.
+    pub(crate) fn inert() -> Self {
+        Self::with_budget(0)
+    }
+
     /// Discard channel pixels while retaining the last announced output extent.
     pub(crate) fn reset_protocol(&mut self) {
         *self = Self {
             output_width: self.output_width,
             output_height: self.output_height,
-            ..Self::default()
+            ..Self::with_budget(self.budget)
         };
     }
 
@@ -225,7 +255,7 @@ impl Compositor {
     /// commands targeting it become no-ops.
     fn charge(&mut self, len: usize) -> bool {
         match self.allocated_bytes.checked_add(len) {
-            Some(total) if total <= MAX_COMPOSITOR_BYTES => {
+            Some(total) if total <= self.budget => {
                 self.allocated_bytes = total;
                 true
             }
@@ -233,7 +263,7 @@ impl Compositor {
                 debug!(
                     len,
                     allocated = self.allocated_bytes,
-                    budget = MAX_COMPOSITOR_BYTES,
+                    budget = self.budget,
                     "compositor allocation refused: budget exhausted"
                 );
                 false
