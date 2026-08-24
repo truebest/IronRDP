@@ -187,7 +187,7 @@ pub fn decode_upgrade_pass(
             .saturating_sub(curr_prog_quant.for_band(band_idx));
         band_idx != NUM_BANDS - 1 && num_bits != 0 && zero_counts[band_idx] != 0
     });
-    let mut srl_decoder = has_srl_values.then(|| srl::SrlDecoder::new(srl_data)).transpose()?;
+    let mut srl_decoder = has_srl_values.then(|| srl::SrlDecoder::new(srl_data));
     let mut srl_values = Vec::with_capacity(NUM_BANDS);
 
     for (band_idx, _) in bands.iter().enumerate() {
@@ -2108,7 +2108,7 @@ mod tests {
     }
 
     #[test]
-    fn upgrade_pass_rejects_truncated_srl() {
+    fn upgrade_pass_tolerates_a_truncated_srl_stream() {
         let mut coefficients = [0i16; COEFFICIENTS_PER_COMPONENT];
         let mut sign = [SIGN_POSITIVE; COEFFICIENTS_PER_COMPONENT];
         sign[0] = SIGN_ZERO;
@@ -2116,6 +2116,8 @@ mod tests {
         let mut prev_prog_quant = ComponentCodecQuant::LOSSLESS;
         prev_prog_quant.hl1 = 4;
 
+        // The stream ends inside its first code word: the pass completes and leaves the
+        // coefficient it could not refine untouched.
         assert_eq!(
             decode_upgrade_pass(
                 &[0x80, 0x00],
@@ -2126,8 +2128,9 @@ mod tests {
                 &mut coefficients,
                 &mut sign,
             ),
-            Err(SrlError::Truncated)
+            Ok(())
         );
+        assert_eq!(coefficients[0], 0);
     }
 
     #[test]
@@ -2144,14 +2147,17 @@ mod tests {
         let coefficients = tile.coefficients;
         let sign = tile.sign;
 
+        // An all-zero stream is one unbounded zero run, which no tile can hold. A stream
+        // that merely ends early is not an error (see the pass test above), so the
+        // all-or-nothing guarantee is exercised with a malformed one.
         assert_eq!(
             tile.decode_upgrade(
-                [&[0x90, 0x00], &[0x80, 0x00], &[]],
+                [&[0x00; 8], &[0x80, 0x00], &[]],
                 [&[], &[], &[]],
                 [ComponentCodecQuant::LOSSLESS; 3],
                 75,
             ),
-            Err(SrlError::Truncated)
+            Err(SrlError::ZeroRunTooLong)
         );
 
         assert_eq!(tile.coefficients, coefficients);
