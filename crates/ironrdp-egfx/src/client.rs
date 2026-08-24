@@ -401,6 +401,13 @@ pub trait GraphicsPipelineHandler: Send {
         false
     }
 
+    /// Whether [`GraphicsPipelineClient::drain_output`] is used. Handlers that render
+    /// from the per-update callbacks get nothing from the composited surfaces and pay
+    /// 33 MB per 4K surface plus a copy of every update for them.
+    fn wants_composited_output(&self) -> bool {
+        true
+    }
+
     /// Called when the server deletes a progressive encoding context
     ///
     /// Per [MS-RDPEGFX 2.2.2.3].
@@ -481,6 +488,11 @@ impl GraphicsPipelineClient {
     /// and its cache spine is allocated lazily, on the first ClearCodec frame,
     /// rather than up front for a codec the session may never use.
     pub fn new(handler: Box<dyn GraphicsPipelineHandler>, h264_decoder: Option<Box<dyn H264Decoder>>) -> Self {
+        let compositor = if handler.wants_composited_output() {
+            Compositor::default()
+        } else {
+            Compositor::inert()
+        };
         Self {
             handler,
             h264_decoder,
@@ -495,7 +507,7 @@ impl GraphicsPipelineClient {
             negotiated_caps: None,
             codec_caps: CodecCapabilities::default(),
             surfaces: BTreeMap::new(),
-            compositor: Compositor::default(),
+            compositor,
             current_frame_id: None,
             frames_queued: 0,
             total_frames_decoded: 0,
