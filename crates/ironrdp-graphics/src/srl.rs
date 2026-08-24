@@ -49,25 +49,26 @@ pub struct SrlDecoder<'a> {
     kp: u8,
     zero_run_remaining: usize,
     nonzero_pending: bool,
+    /// Latched when the stream ends mid-code-word; every later value reads as zero.
+    exhausted: bool,
 }
 
 impl<'a> SrlDecoder<'a> {
-    /// Create a decoder for an SRL stream, excluding its required trailing zero byte.
-    pub fn new(data: &'a [u8]) -> Result<Self, SrlError> {
-        let Some((&terminator, payload)) = data.split_last() else {
-            return Err(SrlError::MissingTerminator);
-        };
-
-        if terminator != 0 {
-            return Err(SrlError::MissingTerminator);
-        }
-
-        Ok(Self {
-            reader: BitReader::new(payload),
+    /// Create a decoder for an SRL stream.
+    ///
+    /// The stream carries no length or terminator of its own: it ends when the tile's
+    /// coefficients are exhausted, and Windows pads it to a byte boundary with whatever
+    /// the last code word left behind. A stream that runs out early is not an error
+    /// either -- the remaining coefficients simply take no refinement (see
+    /// [`Self::decode`]), which is what every interoperating decoder does.
+    pub fn new(data: &'a [u8]) -> Self {
+        Self {
+            reader: BitReader::new(data),
             kp: INITIAL_KP,
             zero_run_remaining: 0,
             nonzero_pending: false,
-        })
+            exhausted: false,
+        }
     }
 
     /// Decode `num_values` entries for one DWT band.
@@ -78,6 +79,11 @@ impl<'a> SrlDecoder<'a> {
         let mut output = Vec::with_capacity(num_values);
 
         while output.len() < num_values {
+            if self.exhausted {
+                output.push(0);
+                continue;
+            }
+
             if self.zero_run_remaining != 0 {
                 self.zero_run_remaining -= 1;
                 output.push(0);
@@ -85,13 +91,23 @@ impl<'a> SrlDecoder<'a> {
             }
 
             if self.nonzero_pending {
-                output.push(self.decode_nonzero(num_bits)?);
+                match self.decode_nonzero(num_bits) {
+                    Ok(value) => output.push(value),
+                    Err(SrlError::Truncated) => self.exhausted = true,
+                    Err(error) => return Err(error),
+                }
                 self.nonzero_pending = false;
                 continue;
             }
 
-            self.zero_run_remaining = self.decode_zero_run()?;
-            self.nonzero_pending = true;
+            match self.decode_zero_run() {
+                Ok(zeros) => {
+                    self.zero_run_remaining = zeros;
+                    self.nonzero_pending = true;
+                }
+                Err(SrlError::Truncated) => self.exhausted = true,
+                Err(error) => return Err(error),
+            }
         }
 
         Ok(output)
@@ -238,7 +254,7 @@ impl Default for SrlEncoder {
 /// magnitude width. Progressive tile decoding should use [`SrlDecoder`]
 /// directly so its state continues between bands.
 pub fn decode_srl(data: &[u8], num_values: usize, num_bits: u8) -> Result<Vec<i16>, SrlError> {
-    let mut decoder = SrlDecoder::new(data)?;
+    let mut decoder = SrlDecoder::new(data);
     decoder.decode(num_values, num_bits)
 }
 
@@ -355,7 +371,7 @@ mod tests {
     fn preserves_zero_run_and_kp_between_bands() {
         // A two-zero run (010) spans the first and second calls.
         // The following positive magnitude-one value uses K=0 after the run.
-        let mut decoder = SrlDecoder::new(&[0x48, 0x00]).unwrap();
+        let mut decoder = SrlDecoder::new(&[0x48, 0x00]);
         assert_eq!(decoder.decode(1, 4), Ok(vec![0]));
         assert_eq!(decoder.decode(2, 4), Ok(vec![0, 1]));
     }
@@ -368,13 +384,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_truncated_stream() {
-        assert_eq!(decode_srl(&[0x80, 0x00], 1, 4), Err(SrlError::Truncated));
+    /// A stream that ends mid-code-word refines nothing further rather than failing:
+    /// the tile keeps the coefficients it already had.
+    #[test]
+    fn exhausted_stream_reads_as_zeros() {
+        assert_eq!(decode_srl(&[0x80, 0x00], 4, 4), Ok(vec![0, 0, 0, 0]));
     }
 
+    /// Windows ends an SRL stream on whatever byte the last code word landed in, so a
+    /// non-zero final byte is ordinary and must decode.
     #[test]
-    fn rejects_missing_terminator() {
-        assert_eq!(decode_srl(&[0x84], 1, 4), Err(SrlError::MissingTerminator));
+    fn accepts_a_stream_without_a_trailing_zero() {
+        assert_eq!(decode_srl(&[0x84], 1, 4), Ok(vec![3]));
     }
 
     #[test]
@@ -400,7 +421,7 @@ mod tests {
         let original = [0, 0, 1, -1, 0, 3];
         let encoded = encode_srl(&original, 4).unwrap();
         assert_eq!(encoded, vec![0x4F, 0x44, 0x00]);
-        let mut decoder = SrlDecoder::new(&encoded).unwrap();
+        let mut decoder = SrlDecoder::new(&encoded);
         assert_eq!(decoder.decode(2, 4), Ok(vec![0, 0]));
         assert_eq!(decoder.decode(1, 4), Ok(vec![1]));
         assert_eq!(decoder.decode(1, 4), Ok(vec![-1]));
