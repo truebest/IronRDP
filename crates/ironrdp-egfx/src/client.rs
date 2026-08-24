@@ -926,21 +926,24 @@ impl GraphicsPipelineClient {
         let (surface_width, surface_height) = (surface.width, surface.height);
 
         // A payload this client cannot decode costs the tiles it carried, which the next
-        // update repaints; ending the session over it costs the session. Tile state is
-        // unchanged on failure, so later payloads still decode against valid coefficients.
-        let tiles = match self.progressive_decoder.decode_bitmap(
+        // update repaints; ending the session over it costs the session. The tiles decoded
+        // before the failure are kept: they already advanced the decoder's state, so
+        // withholding them would leave later difference tiles refining an image the
+        // consumer never saw.
+        let (tiles, error) = self.progressive_decoder.decode_bitmap_partial(
             pdu.surface_id,
             pdu.codec_context_id,
             surface_width,
             surface_height,
             &pdu.bitmap_data,
-        ) {
-            Ok(tiles) => {
+        );
+        let mut report_stream_to_handler = false;
+        match error {
+            None => {
                 self.progressive_failures_in_a_row = 0;
                 self.progressive_resets_without_progress = 0;
-                tiles
             }
-            Err(error) => {
+            Some(error) => {
                 self.progressive_failures = self.progressive_failures.saturating_add(1);
                 self.progressive_failures_in_a_row = self.progressive_failures_in_a_row.saturating_add(1);
                 if self.progressive_failures == 1 || self.progressive_failures.is_multiple_of(64) {
@@ -972,11 +975,10 @@ impl GraphicsPipelineClient {
                 // handler and let it decide, the route unsupported codecs already take.
                 if self.progressive_resets_without_progress >= MAX_PROGRESSIVE_RESETS_WITHOUT_PROGRESS {
                     self.progressive_resets_without_progress = 0;
-                    self.handler.on_unhandled_pdu(&GfxPdu::WireToSurface2(pdu));
+                    report_stream_to_handler = true;
                 }
-                return Ok(());
             }
-        };
+        }
 
         for tile in tiles {
             let tile_left = tile.x_idx.saturating_mul(TILE_DIM);
@@ -1039,6 +1041,12 @@ impl GraphicsPipelineClient {
                 }
                 emit_update(destination_rectangle, data);
             }
+        }
+
+        // Reported after the surviving tiles reach the handler, so its policy sees
+        // everything this payload did produce.
+        if report_stream_to_handler {
+            self.handler.on_unhandled_pdu(&GfxPdu::WireToSurface2(pdu));
         }
 
         Ok(())
