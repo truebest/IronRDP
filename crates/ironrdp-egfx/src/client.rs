@@ -483,6 +483,8 @@ pub struct GraphicsPipelineClient {
     current_frame_id: Option<u32>,
     frames_queued: u32,
     total_frames_decoded: u32,
+    suspend_frame_acknowledgments: bool,
+    frame_acknowledgments_suspended: bool,
 }
 
 impl GraphicsPipelineClient {
@@ -517,7 +519,19 @@ impl GraphicsPipelineClient {
             current_frame_id: None,
             frames_queued: 0,
             total_frames_decoded: 0,
+            suspend_frame_acknowledgments: false,
+            frame_acknowledgments_suspended: false,
         }
+    }
+
+    /// Send one suspended frame acknowledgment and then stop acknowledging frames.
+    ///
+    /// This tells the server not to apply graphics backpressure and is useful for clients
+    /// whose decoder consumes frames faster than they arrive.
+    #[must_use]
+    pub fn with_suspended_frame_acknowledgments(mut self) -> Self {
+        self.suspend_frame_acknowledgments = true;
+        self
     }
 
     // ========================================================================
@@ -1272,11 +1286,22 @@ impl GraphicsPipelineClient {
 
         self.handler.on_frame_complete(frame_id);
 
+        if self.frame_acknowledgments_suspended {
+            return Ok(vec![]);
+        }
+
         // Per [3.3.5.12]: client MUST send FrameAcknowledge after EndFrame.
-        // We send the actual queue depth (not Unavailable / 0xFFFFFFFF as FreeRDP does);
-        // the real value gives the server backpressure information for frame pacing.
+        // SUSPEND_FRAME_ACKNOWLEDGEMENT opts out of subsequent acknowledgments; otherwise
+        // report the queue depth as unavailable because this client does not track buffered
+        // graphics bytes.
+        let queue_depth = if self.suspend_frame_acknowledgments {
+            self.frame_acknowledgments_suspended = true;
+            QueueDepth::Suspend
+        } else {
+            QueueDepth::Unavailable
+        };
         let ack = GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
-            queue_depth: QueueDepth::from_u32(self.frames_queued),
+            queue_depth,
             frame_id,
             total_frames_decoded: self.total_frames_decoded,
         });
@@ -1317,6 +1342,15 @@ impl DvcProcessor for GraphicsPipelineClient {
             }
         };
 
+        // The advertise decides whether a server offers H.264 at all, and servers disagree
+        // about which flags they honour; the exact bytes are worth one line per connect.
+        for raw in caps.iter().map(RawCapabilitySet::from) {
+            debug!(
+                version = format!("0x{:08x}", u32::from(raw.version)),
+                body = format!("{:02x?}", raw.data),
+                "Advertising EGFX capability set"
+            );
+        }
         let pdu = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(&caps));
 
         #[expect(clippy::as_conversions, reason = "Box<GfxPdu> to Box<dyn DvcEncode> coercion")]
@@ -1466,6 +1500,8 @@ fn crop_decoded_frame(
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex};
+
+    use ironrdp_core::{Decode as _, encode_vec};
 
     use super::*;
 
@@ -1771,6 +1807,33 @@ mod tests {
         assert!(client.surfaces.is_empty(), "surfaces should be cleared");
         assert!(client.current_frame_id.is_none(), "frame_id should be reset");
         assert_eq!(client.frames_queued, 0, "frame queue should be reset");
+    }
+
+    #[test]
+    fn suspended_frame_acknowledgments_are_sent_once() {
+        let mut client =
+            GraphicsPipelineClient::new(Box::new(TestHandler), None).with_suspended_frame_acknowledgments();
+
+        let first = client
+            .handle_pdu(GfxPdu::EndFrame(crate::pdu::EndFramePdu { frame_id: 1 }))
+            .unwrap();
+        let second = client
+            .handle_pdu(GfxPdu::EndFrame(crate::pdu::EndFramePdu { frame_id: 2 }))
+            .unwrap();
+
+        assert_eq!(first.len(), 1);
+        let encoded = encode_vec(first[0].as_ref()).unwrap();
+        let mut cursor = ReadCursor::new(&encoded);
+        assert!(matches!(
+            GfxPdu::decode(&mut cursor).unwrap(),
+            GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
+                queue_depth: QueueDepth::Suspend,
+                frame_id: 1,
+                total_frames_decoded: 1,
+            })
+        ));
+        assert!(second.is_empty());
+        assert!(client.frame_acknowledgments_suspended);
     }
 
     #[test]
