@@ -269,7 +269,7 @@ fn build_config(
         compression_type,
         pointer_software_rendering: true,
         multitransport_flags: None,
-        support_dyn_vc_gfx_protocol: false,
+        support_dyn_vc_gfx_protocol: true,
         performance_flags: PerformanceFlags::default(),
         desktop_scale_factor: 0,
         hardware_id: None,
@@ -315,10 +315,12 @@ fn connect(
 
     let mut framed = ironrdp_blocking::Framed::new(tcp_stream);
 
-    let mut connector = connector::ClientConnector::new(config, client_addr)
-        .with_static_channel(ironrdp_dvc::DrdynvcClient::new().with_dynamic_channel(
-            ironrdp_egfx::client::GraphicsPipelineClient::new(Box::new(Avc444Probe), None),
-        ));
+    let mut connector = connector::ClientConnector::new(config, client_addr).with_static_channel(
+        ironrdp_dvc::DrdynvcClient::new().with_dynamic_channel(ironrdp_egfx::client::GraphicsPipelineClient::new(
+            Box::new(Avc444Probe),
+            None,
+        )),
+    );
 
     let should_upgrade = ironrdp_blocking::connect_begin(&mut framed, &mut connector).context("begin connection")?;
 
@@ -375,14 +377,12 @@ fn active_stage(
         if started.elapsed() >= next_move {
             next_move = started.elapsed() + std::time::Duration::from_millis(250);
             x = if x > 1200 { 200 } else { x + 40 };
-            let event = ironrdp::pdu::input::fast_path::FastPathInputEvent::MouseEvent(
-                ironrdp::pdu::input::MousePdu {
-                    flags: ironrdp::pdu::input::mouse::PointerFlags::MOVE,
-                    number_of_wheel_rotation_units: 0,
-                    x_position: x,
-                    y_position: 400,
-                },
-            );
+            let event = ironrdp::pdu::input::fast_path::FastPathInputEvent::MouseEvent(ironrdp::pdu::input::MousePdu {
+                flags: ironrdp::pdu::input::mouse::PointerFlags::MOVE,
+                number_of_wheel_rotation_units: 0,
+                x_position: x,
+                y_position: 400,
+            });
             if let Ok(outputs) = active_stage.process_fastpath_input(image, &[event]) {
                 for out in outputs {
                     if let ActiveStageOutput::ResponseFrame(frame) = out {
