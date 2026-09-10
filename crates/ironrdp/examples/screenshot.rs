@@ -581,9 +581,11 @@ fn summarize_nals(data: &[u8]) -> String {
 
 impl ironrdp_egfx::client::GraphicsPipelineHandler for Avc444Probe {
     fn capabilities(&self) -> Vec<ironrdp_egfx::pdu::CapabilitySet> {
-        vec![ironrdp_egfx::pdu::CapabilitySet::V10_7 {
-            flags: ironrdp_egfx::pdu::CapabilitiesV107Flags::SMALL_CACHE,
-        }]
+        let mut flags = ironrdp_egfx::pdu::CapabilitiesV107Flags::SMALL_CACHE;
+        if std::env::var_os("THIN").is_some() {
+            flags |= ironrdp_egfx::pdu::CapabilitiesV107Flags::AVC_THIN_CLIENT;
+        }
+        vec![ironrdp_egfx::pdu::CapabilitySet::V10_7 { flags }]
     }
 
     fn wants_avc420_passthrough(&self) -> bool {

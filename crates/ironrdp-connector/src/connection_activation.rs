@@ -213,10 +213,9 @@ impl Sequence for ConnectionActivationSequence {
                             return Ok(Written::Nothing);
                         }
 
-                        return Err(reason_err!(
+                        return Err(crate::ConnectorError::new(
                             "ConnectionActivation::CapabilitiesExchange",
-                            "server ended the session with error info: {}",
-                            error_info.description()
+                            crate::ConnectorErrorKind::ServerErrorInfo(error_info),
                         ));
                     }
 
