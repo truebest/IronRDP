@@ -440,6 +440,7 @@ pub enum ConnectorErrorKind {
     #[cfg(feature = "credssp")]
     Credssp(sspi::Error),
     Reason(String),
+    ServerErrorInfo(ironrdp_pdu::rdp::server_error_info::ErrorInfo),
     AccessDenied,
     General,
     Custom,
@@ -454,6 +455,7 @@ impl fmt::Display for ConnectorErrorKind {
             #[cfg(feature = "credssp")]
             ConnectorErrorKind::Credssp(_) => write!(f, "CredSSP"),
             ConnectorErrorKind::Reason(description) => write!(f, "reason: {description}"),
+            ConnectorErrorKind::ServerErrorInfo(info) => f.write_str(&info.description()),
             ConnectorErrorKind::AccessDenied => write!(f, "access denied"),
             ConnectorErrorKind::General => write!(f, "general error"),
             ConnectorErrorKind::Custom => write!(f, "custom error"),
@@ -469,7 +471,7 @@ impl core::error::Error for ConnectorErrorKind {
             ConnectorErrorKind::Decode(e) => Some(e),
             #[cfg(feature = "credssp")]
             ConnectorErrorKind::Credssp(e) => Some(e),
-            ConnectorErrorKind::Reason(_) => None,
+            ConnectorErrorKind::Reason(_) | ConnectorErrorKind::ServerErrorInfo(_) => None,
             ConnectorErrorKind::AccessDenied => None,
             ConnectorErrorKind::Custom => None,
             ConnectorErrorKind::General => None,

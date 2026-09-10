@@ -12,6 +12,7 @@ The lgnome patch set retains:
 - Compositor opt-out for direct native presentation.
 - Partial Progressive output, bounded recovery, and undecodable-stream reporting.
 - Windows SRL decoding fixes and optional frame-acknowledgment suspension.
+- Typed server termination reasons during activation and active sessions.
 - The screenshot diagnostic's graphics probes.
 
 Upstream now provides REGION clipping, the Windows Progressive context/quality fixes,

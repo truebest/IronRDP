@@ -811,7 +811,7 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
                         mcs::DisconnectReason::UserRequested => GracefulDisconnectReason::UserInitiated,
                         other => GracefulDisconnectReason::Other(other.description().to_owned()),
                     },
-                    x224::DisconnectDescription::ErrorInfo(info) => GracefulDisconnectReason::Other(info.description()),
+                    x224::DisconnectDescription::ErrorInfo(info) => GracefulDisconnectReason::ErrorInfo(info),
                 };
 
                 Ok(Self::Terminate(desc))
@@ -836,6 +836,7 @@ impl TryFrom<x224::ProcessorOutput> for ActiveStageOutput {
 /// disconnect reasons.
 #[derive(Debug, Clone)]
 pub enum GracefulDisconnectReason {
+    ErrorInfo(ironrdp_pdu::rdp::server_error_info::ErrorInfo),
     UserInitiated,
     ServerInitiated,
     Other(String),
@@ -847,6 +848,7 @@ impl GracefulDisconnectReason {
             GracefulDisconnectReason::UserInitiated => "user initiated disconnect".to_owned(),
             GracefulDisconnectReason::ServerInitiated => "server initiated disconnect".to_owned(),
             GracefulDisconnectReason::Other(description) => description.clone(),
+            GracefulDisconnectReason::ErrorInfo(info) => info.description(),
         }
     }
 }
@@ -1018,6 +1020,25 @@ mod tests {
     use ironrdp_pdu::input::mouse::PointerFlags;
     use ironrdp_pdu::pointer::{ColorPointerAttribute, Point16, PointerAttribute, PointerUpdateData};
     use ironrdp_rdpei::pdu::{PenEventPdu, RdpInputProtocolVersion, RdpeiPdu, ScReadyPdu, TouchEventPdu};
+
+    #[test]
+    fn termination_preserves_server_error_info() {
+        use ironrdp_pdu::rdp::server_error_info::{ErrorInfo, ProtocolIndependentCode};
+        for code in [
+            ProtocolIndependentCode::ServerShutdown,
+            ProtocolIndependentCode::ServerReboot,
+            ProtocolIndependentCode::LogoffByUser,
+        ] {
+            let info = ErrorInfo::ProtocolIndependentCode(code);
+            let output = ActiveStageOutput::try_from(x224::ProcessorOutput::Disconnect(
+                x224::DisconnectDescription::ErrorInfo(info),
+            ))
+            .unwrap();
+            assert!(
+                matches!(output, ActiveStageOutput::Terminate(GracefulDisconnectReason::ErrorInfo(actual)) if actual == info)
+            );
+        }
+    }
 
     #[test]
     fn full_redraw_prefers_suppress_output_toggle_when_supported() {

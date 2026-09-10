@@ -213,15 +213,12 @@ fn set_error_info_during_capabilities_exchange_surfaces_the_disconnect_reason() 
         .step(&frame, None, &mut output)
         .expect_err("a Set Error Info PDU during capabilities exchange must end the sequence with an error");
 
-    let message = err.to_string();
-    assert!(
-        message.contains("error info"),
-        "the error should surface the server's disconnect reason, got: {message}"
-    );
-    assert!(
-        !message.contains("unexpected Share Control PDU"),
-        "the disconnect reason must not be masked by the generic unexpected-PDU error, got: {message}"
-    );
+    assert!(matches!(
+        err.kind(),
+        ironrdp_connector::ConnectorErrorKind::ServerErrorInfo(ErrorInfo::ProtocolIndependentCode(
+            ProtocolIndependentCode::RpcInitiatedDisconnect
+        ))
+    ));
 }
 
 #[test]
@@ -253,6 +250,43 @@ fn none_error_info_during_capabilities_exchange_is_skipped() {
         ),
         "state should remain CapabilitiesExchange after a benign ERRINFO_NONE PDU"
     );
+}
+
+#[test]
+fn shutdown_reason_survives_activation_and_finalization() {
+    for code in [
+        ProtocolIndependentCode::ServerShutdown,
+        ProtocolIndependentCode::ServerReboot,
+    ] {
+        let info = ErrorInfo::ProtocolIndependentCode(code);
+        let frame = encode_server_share_control(ShareControlPdu::Data(ShareDataHeader {
+            share_data_pdu: ShareDataPdu::ServerSetErrorInfo(ServerSetErrorInfoPdu(info)),
+            stream_priority: StreamPriority::Medium,
+            compression_flags: CompressionFlags::empty(),
+            compression_type: CompressionType::K8,
+        }));
+        let mut activation = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+        let mut finalization = ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID);
+        let demand = encode_server_share_control(ShareControlPdu::ServerDemandActive(SERVER_DEMAND_ACTIVE.clone()));
+        finalization.step(&demand, None, &mut WriteBuf::new()).unwrap();
+        while finalization.next_pdu_hint().is_none() {
+            finalization.step_no_input(&mut WriteBuf::new()).unwrap();
+        }
+        let mut connector = ClientConnector::new(test_config(), "127.0.0.1:3389".parse().unwrap());
+        connector.state = ClientConnectorState::CapabilitiesExchange {
+            connection_activation: ConnectionActivationSequence::new(test_config(), IO_CHANNEL_ID, USER_CHANNEL_ID),
+        };
+        for seq in [
+            &mut activation as &mut dyn ironrdp_connector::Sequence,
+            &mut finalization,
+            &mut connector,
+        ] {
+            let err = seq.step(&frame, None, &mut WriteBuf::new()).unwrap_err();
+            assert!(
+                matches!(err.kind(), ironrdp_connector::ConnectorErrorKind::ServerErrorInfo(actual) if *actual == info)
+            );
+        }
+    }
 }
 
 #[test]

@@ -245,10 +245,9 @@ impl Sequence for ConnectionFinalizationSequence {
                                 server_error_info::ProtocolIndependentCode::None,
                             ) => ConnectionFinalizationState::WaitForResponse,
                             _ => {
-                                return Err(reason_err!(
+                                return Err(crate::ConnectorError::new(
                                     "ServerSetErrorInfo",
-                                    "server returned error info: {}",
-                                    error_info.description()
+                                    crate::ConnectorErrorKind::ServerErrorInfo(error_info),
                                 ));
                             }
                         }

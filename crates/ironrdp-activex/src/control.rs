@@ -1006,7 +1006,7 @@ impl DisconnectInfo {
                 description: "The RDP server ended the session.",
                 ..Self::no_info()
             },
-            GracefulDisconnectReason::Other(_) => Self {
+            GracefulDisconnectReason::Other(_) | GracefulDisconnectReason::ErrorInfo(_) => Self {
                 description: "The RDP session ended with an unclassified server reason.",
                 ..Self::no_info()
             },

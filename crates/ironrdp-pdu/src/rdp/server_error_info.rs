@@ -127,6 +127,8 @@ pub enum ProtocolIndependentCode {
     CloseStackOnDriverIfaceFailure = 0x0000_0012,
     ServerWinlogonCrash = 0x0000_0017,
     ServerCsrssCrash = 0x0000_0018,
+    ServerShutdown = 0x0000_0019,
+    ServerReboot = 0x0000_001A,
 }
 
 impl ProtocolIndependentCode {
@@ -169,6 +171,8 @@ impl ProtocolIndependentCode {
                 "The display driver in the remote session started up successfully, but due to internal failures was not usable by the remoting stack"
             }
             Self::ServerWinlogonCrash => "The Winlogon process running in the remote session terminated unexpectedly",
+            Self::ServerShutdown => "The remote server is shutting down",
+            Self::ServerReboot => "The remote server is restarting",
             Self::ServerCsrssCrash => "The CSRSS process running in the remote session terminated unexpectedly",
         }
     }
@@ -598,6 +602,20 @@ mod tests {
     const SERVER_SET_ERROR_INFO: ServerSetErrorInfoPdu = ServerSetErrorInfoPdu(
         ErrorInfo::ProtocolIndependentLicensingCode(ProtocolIndependentLicensingCode::Internal),
     );
+
+    #[test]
+    fn shutdown_and_reboot_roundtrip() {
+        for (value, code) in [
+            (0x19u32, ProtocolIndependentCode::ServerShutdown),
+            (0x1Au32, ProtocolIndependentCode::ServerReboot),
+        ] {
+            let bytes = value.to_le_bytes();
+            let pdu: ServerSetErrorInfoPdu = decode(&bytes).unwrap();
+            assert_eq!(pdu.0, ErrorInfo::ProtocolIndependentCode(code));
+            assert_eq!(encode_vec(&pdu).unwrap(), bytes);
+        }
+        assert!(decode::<ServerSetErrorInfoPdu>(&0xFFFFFFFFu32.to_le_bytes()).is_err());
+    }
 
     #[test]
     fn from_buffer_correctly_parses_server_set_error_info() {
