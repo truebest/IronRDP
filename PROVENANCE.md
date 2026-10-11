@@ -10,7 +10,8 @@ The lgnome patch set retains:
 - Typed DVC listeners across server-driven channel recreation.
 - Hardware AVC420/base-view passthrough and auxiliary-view callbacks.
 - Compositor opt-out for direct native presentation.
-- Partial Progressive output, bounded recovery, and undecodable-stream reporting.
+- Partial Progressive output, preserved codec state across dropped updates, and bounded
+  undecodable-stream reporting.
 - Windows SRL decoding fixes and optional frame-acknowledgment suspension.
 - Typed server termination reasons during activation and active sessions.
 - The screenshot diagnostic's graphics probes.
@@ -25,5 +26,10 @@ For the reassembly fix, upstream `master` was fetched and inspected at
 `e4143f26306a6639a889d80c1c484ca69c365a8f` (2026-10-11). Its DVC accumulator
 matched the fork and its SVC accumulator still lacked a message budget, so the
 limits are a local fork patch; the existing patch set above is retained.
+
+Progressive decode failures preserve tile contexts on every surface. The client retains
+its cumulative, rate-limited failure logging and reports sustained undecodable streams
+through the existing handler callback without resetting shared decoder state. Protocol
+context and surface deletion continue to own that state lifetime.
 
 License: MIT OR Apache-2.0; see LICENSE-MIT and LICENSE-APACHE.

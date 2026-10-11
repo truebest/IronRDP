@@ -76,12 +76,8 @@ use crate::pdu::{
     SurfaceToSurfacePdu, WireToSurface2Pdu,
 };
 
-/// Consecutive undecodable Progressive payloads that force the decoder's state to be dropped.
-const MAX_PROGRESSIVE_FAILURES_IN_A_ROW: u64 = 16;
-
-/// Decoder resets that produced no decodable payload before the stream is reported
-/// undecodable to the handler.
-const MAX_PROGRESSIVE_RESETS_WITHOUT_PROGRESS: u64 = 2;
+/// Consecutive undecodable Progressive payloads before reporting the stream to the handler.
+const MAX_PROGRESSIVE_FAILURES_BEFORE_REPORTING: u64 = 32;
 
 /// Max capacity to keep for decompressed buffer when cleared.
 const MAX_DECOMPRESSED_BUFFER_CAPACITY: usize = 16384; // 16 KiB
@@ -476,7 +472,6 @@ pub struct GraphicsPipelineClient {
     dropped_updates: u64,
     progressive_failures: u64,
     progressive_failures_in_a_row: u64,
-    progressive_resets_without_progress: u64,
 
     decompressor: zgfx::Decompressor,
     decompressed_buffer: Vec<u8>,
@@ -516,7 +511,6 @@ impl GraphicsPipelineClient {
             dropped_updates: 0,
             progressive_failures: 0,
             progressive_failures_in_a_row: 0,
-            progressive_resets_without_progress: 0,
             decompressor: zgfx::Decompressor::new(),
             decompressed_buffer: Vec::new(),
             state: ClientState::WaitingForConfirm,
@@ -600,6 +594,7 @@ impl GraphicsPipelineClient {
         self.clearcodec_decoder = None;
         self.planar_decoder = BitmapStreamDecoder::default();
         self.progressive_decoder = ProgressiveDecoder::new();
+        self.progressive_failures_in_a_row = 0;
         if let Some(decoder) = self.h264_decoder.as_mut() {
             decoder.reset();
         }
@@ -1080,7 +1075,6 @@ impl GraphicsPipelineClient {
         match error {
             None => {
                 self.progressive_failures_in_a_row = 0;
-                self.progressive_resets_without_progress = 0;
             }
             Some(error) => {
                 self.drop_update(pdu.codec_id, pdu.surface_id, pdu.bitmap_data.len(), &error);
@@ -1096,25 +1090,9 @@ impl GraphicsPipelineClient {
                         "skipping undecodable RFX Progressive payload"
                     );
                 }
-                // Skipping forever would leave a frozen region with no way back. FreeRDP
-                // closes the graphics channel so the server rebuilds it; drop the codec
-                // state instead, which is the part a rebuild would have cleared.
-                if self.progressive_failures_in_a_row >= MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
-                    warn!(
-                        failures = self.progressive_failures_in_a_row,
-                        "resetting RFX Progressive decoder state"
-                    );
+                // Keep codec contexts and tiles until their protocol-driven deletion.
+                if self.progressive_failures_in_a_row >= MAX_PROGRESSIVE_FAILURES_BEFORE_REPORTING {
                     self.progressive_failures_in_a_row = 0;
-                    self.progressive_resets_without_progress =
-                        self.progressive_resets_without_progress.saturating_add(1);
-                    self.progressive_decoder.reset();
-                }
-                // Resets that never yield a decodable payload mean the stream itself is
-                // unusable, not the decoder state. A server with no other codec would
-                // otherwise hold a session that renders nothing, so hand the payload to the
-                // handler and let it decide, the route unsupported codecs already take.
-                if self.progressive_resets_without_progress >= MAX_PROGRESSIVE_RESETS_WITHOUT_PROGRESS {
-                    self.progressive_resets_without_progress = 0;
                     report_stream_to_handler = true;
                 }
             }
@@ -2673,94 +2651,6 @@ mod tests {
         assert!(client.drain_output().is_empty());
     }
 
-    fn progressive_upgrade_stream() -> Vec<u8> {
-        use ironrdp_pdu::codecs::rfx::progressive::{
-            ComponentCodecQuant, ProgressiveBlock, ProgressiveFrameBeginPdu, ProgressiveFrameEndPdu, ProgressiveRegion,
-            ProgressiveTile, TileUpgrade, encode_progressive_stream,
-        };
-
-        encode_progressive_stream(&[
-            ProgressiveBlock::FrameBegin(ProgressiveFrameBeginPdu {
-                frame_index: 1,
-                region_count: 1,
-            }),
-            ProgressiveBlock::Region(ProgressiveRegion {
-                tile_size: 0x40,
-                rects: vec![rect(0, 0, 64, 64)],
-                quant_vals: vec![ComponentCodecQuant::LOSSLESS],
-                quant_prog_vals: vec![],
-                flags: 0,
-                tiles: vec![ProgressiveTile::Upgrade(TileUpgrade {
-                    quant_idx_y: 0,
-                    quant_idx_cb: 0,
-                    quant_idx_cr: 0,
-                    x_idx: 0,
-                    y_idx: 0,
-                    quality: 0xFF,
-                    y_srl_data: &[],
-                    y_raw_data: &[],
-                    cb_srl_data: &[],
-                    cb_raw_data: &[],
-                    cr_srl_data: &[],
-                    cr_raw_data: &[],
-                })],
-            }),
-            ProgressiveBlock::FrameEnd(ProgressiveFrameEndPdu),
-        ])
-        .unwrap()
-    }
-
-    #[test]
-    fn repeated_decode_failures_preserve_progressive_tiles_on_all_surfaces() {
-        let updates = Arc::new(Mutex::new(Vec::new()));
-        let mut client = progressive_client();
-        client.handler = Box::new(CapturingHandler {
-            updates: Arc::clone(&updates),
-            unhandled: Arc::new(Mutex::new(0)),
-        });
-        client
-            .handle_pdu(GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
-                surface_id: 2,
-                width: 64,
-                height: 64,
-                pixel_format: PixelFormat::XRgb,
-            }))
-            .unwrap();
-        for surface_id in [1, 2] {
-            send(&mut client, surface_id, progressive_tile_stream(0, 0, 64, 64));
-        }
-        assert_eq!(updates.lock().unwrap().len(), 2);
-        updates.lock().unwrap().clear();
-
-        for _ in 0..64 {
-            wire_progressive(&mut client, vec![0xFF; 32]).unwrap();
-        }
-        assert_eq!(client.dropped_updates, 64);
-        for surface_id in [2, 1] {
-            send(&mut client, surface_id, progressive_upgrade_stream());
-        }
-        let updates = updates.lock().unwrap();
-        assert_eq!(
-            updates.len(),
-            2,
-            "both contexts must retain the first-pass tile for UPGRADE"
-        );
-        assert_eq!(&updates[0].3[..4], &[128, 128, 128, 255]);
-        assert_eq!(&updates[1].3[..4], &[128, 128, 128, 255]);
-
-        fn send(client: &mut GraphicsPipelineClient, surface_id: u16, bitmap_data: Vec<u8>) {
-            client
-                .handle_pdu(GfxPdu::WireToSurface2(WireToSurface2Pdu {
-                    surface_id,
-                    codec_id: crate::pdu::Codec2Type::RemoteFxProgressive,
-                    codec_context_id: 7,
-                    pixel_format: PixelFormat::XRgb,
-                    bitmap_data,
-                }))
-                .unwrap();
-        }
-    }
-
     #[test]
     fn repeated_decode_failures_preserve_clearcodec_glyphs_across_graphics_reset() {
         use ironrdp_graphics::clearcodec::ClearCodecEncoder;
@@ -2832,6 +2722,43 @@ mod tests {
         assert_eq!(client.dropped_updates, 1);
     }
 
+    fn progressive_upgrade_stream() -> Vec<u8> {
+        use ironrdp_pdu::codecs::rfx::progressive::{
+            ComponentCodecQuant, ProgressiveBlock, ProgressiveFrameBeginPdu, ProgressiveFrameEndPdu, ProgressiveRegion,
+            ProgressiveTile, TileUpgrade, encode_progressive_stream,
+        };
+
+        encode_progressive_stream(&[
+            ProgressiveBlock::FrameBegin(ProgressiveFrameBeginPdu {
+                frame_index: 1,
+                region_count: 1,
+            }),
+            ProgressiveBlock::Region(ProgressiveRegion {
+                tile_size: 0x40,
+                rects: vec![rect(0, 0, 64, 64)],
+                quant_vals: vec![ComponentCodecQuant::LOSSLESS],
+                quant_prog_vals: vec![],
+                flags: 0,
+                tiles: vec![ProgressiveTile::Upgrade(TileUpgrade {
+                    quant_idx_y: 0,
+                    quant_idx_cb: 0,
+                    quant_idx_cr: 0,
+                    x_idx: 0,
+                    y_idx: 0,
+                    quality: 0xFF,
+                    y_srl_data: &[],
+                    y_raw_data: &[],
+                    cb_srl_data: &[],
+                    cb_raw_data: &[],
+                    cr_srl_data: &[],
+                    cr_raw_data: &[],
+                })],
+            }),
+            ProgressiveBlock::FrameEnd(ProgressiveFrameEndPdu),
+        ])
+        .unwrap()
+    }
+
     #[test]
     fn an_undecodable_clearcodec_update_is_dropped_not_fatal() {
         let mut client = progressive_client();
@@ -2851,6 +2778,110 @@ mod tests {
 
         assert!(result.is_ok());
         assert_eq!(client.dropped_updates, 1);
+    }
+
+    #[test]
+    fn repeated_decode_failures_preserve_progressive_tiles_on_all_surfaces() {
+        for (failed_surface, bad_payload) in [(1, vec![0xFF; 32]), (3, progressive_context_stream(false))] {
+            let updates = Arc::new(Mutex::new(Vec::new()));
+            let mut client = progressive_client();
+            client.handler = Box::new(CapturingHandler {
+                updates: Arc::clone(&updates),
+                unhandled: Arc::new(Mutex::new(0)),
+            });
+            for surface_id in [2, 3] {
+                client
+                    .handle_pdu(GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
+                        surface_id,
+                        width: 64,
+                        height: 64,
+                        pixel_format: PixelFormat::XRgb,
+                    }))
+                    .unwrap();
+            }
+            for surface_id in [1, 2] {
+                send(&mut client, surface_id, progressive_tile_stream(0, 0, 64, 64));
+            }
+            assert_eq!(updates.lock().unwrap().len(), 2);
+            updates.lock().unwrap().clear();
+
+            for _ in 0..64 {
+                send(&mut client, failed_surface, bad_payload.clone());
+            }
+            assert_eq!(client.progressive_failures, 64);
+            for surface_id in [2, 1] {
+                send(&mut client, surface_id, progressive_upgrade_stream());
+            }
+            let updates = updates.lock().unwrap();
+            assert_eq!(
+                updates.len(),
+                2,
+                "both contexts must retain the first-pass tile for UPGRADE"
+            );
+            assert_eq!(&updates[0].3[..4], &[128, 128, 128, 255]);
+            assert_eq!(&updates[1].3[..4], &[128, 128, 128, 255]);
+        }
+
+        fn send(client: &mut GraphicsPipelineClient, surface_id: u16, bitmap_data: Vec<u8>) {
+            client
+                .handle_pdu(GfxPdu::WireToSurface2(WireToSurface2Pdu {
+                    surface_id,
+                    codec_id: crate::pdu::Codec2Type::RemoteFxProgressive,
+                    codec_context_id: 7,
+                    pixel_format: PixelFormat::XRgb,
+                    bitmap_data,
+                }))
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn interleaved_clearcodec_updates_preserve_progressive_tiles() {
+        use ironrdp_graphics::clearcodec::ClearCodecEncoder;
+        use ironrdp_pdu::codecs::clearcodec::FLAG_GLYPH_HIT;
+
+        let updates = Arc::new(Mutex::new(Vec::new()));
+        let mut client = progressive_client();
+        client.handler = Box::new(CapturingHandler {
+            updates: Arc::clone(&updates),
+            unhandled: Arc::new(Mutex::new(0)),
+        });
+        wire_progressive(&mut client, progressive_tile_stream(0, 0, 64, 64)).unwrap();
+        let mut encoder = ClearCodecEncoder::new();
+        let pixel = [0x12, 0x34, 0x56, 0xFF];
+        send(&mut client, encoder.encode(&pixel, 1, 1));
+        let glyph_hit = encoder.encode(&pixel, 1, 1);
+        assert_ne!(glyph_hit[0] & FLAG_GLYPH_HIT, 0);
+        updates.lock().unwrap().clear();
+
+        for _ in 0..64 {
+            wire_progressive(&mut client, vec![0xFF; 32]).unwrap();
+            send(&mut client, glyph_hit.clone());
+        }
+        assert_eq!(updates.lock().unwrap().len(), 64);
+        assert_eq!(client.progressive_failures, 64);
+        updates.lock().unwrap().clear();
+        wire_progressive(&mut client, progressive_upgrade_stream()).unwrap();
+        let updates = updates.lock().unwrap();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(&updates[0].3[..4], &[128, 128, 128, 255]);
+
+        fn send(client: &mut GraphicsPipelineClient, bitmap_data: Vec<u8>) {
+            client
+                .handle_pdu(GfxPdu::WireToSurface1(crate::pdu::WireToSurface1Pdu {
+                    surface_id: 1,
+                    codec_id: Codec1Type::ClearCodec,
+                    pixel_format: PixelFormat::XRgb,
+                    destination_rectangle: ExclusiveRectangle {
+                        left: 0,
+                        top: 0,
+                        right: 1,
+                        bottom: 1,
+                    },
+                    bitmap_data,
+                }))
+                .unwrap();
+        }
     }
 
     #[test]
@@ -2879,21 +2910,21 @@ mod tests {
             }))
             .unwrap();
 
-        // Failures short of a full reset streak stay invisible to the handler.
-        for _ in 0..MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+        for _ in 1..MAX_PROGRESSIVE_FAILURES_BEFORE_REPORTING {
             assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
         }
         assert_eq!(*unhandled.lock().expect("unhandled lock"), 0);
+        assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
+        assert_eq!(*unhandled.lock().expect("unhandled lock"), 1);
 
-        // A second reset without a single decodable payload reports the stream instead.
-        for _ in 0..MAX_PROGRESSIVE_FAILURES_IN_A_ROW {
+        wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
+        for _ in 1..MAX_PROGRESSIVE_FAILURES_BEFORE_REPORTING {
             assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
         }
         assert_eq!(*unhandled.lock().expect("unhandled lock"), 1);
-
-        // A decodable payload clears the streak, so the next one starts from scratch.
-        wire_progressive(&mut client, progressive_context_stream(true)).unwrap();
-        assert_eq!(client.progressive_resets_without_progress, 0);
+        assert!(wire_progressive(&mut client, vec![0xFF; 32]).is_ok());
+        assert_eq!(*unhandled.lock().expect("unhandled lock"), 2);
+        assert_eq!(client.progressive_failures, 64);
     }
 
     #[test]
