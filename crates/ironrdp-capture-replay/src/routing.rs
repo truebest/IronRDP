@@ -934,6 +934,10 @@ impl H264Decoder for UnsupportedH264Decoder {
 impl_as_any!(ReplayEgfxChannel);
 
 impl DvcProcessor for ReplayEgfxChannel {
+    fn maximum_message_size(&self) -> usize {
+        self.client.maximum_message_size()
+    }
+
     fn channel_name(&self) -> &str {
         ironrdp_egfx::CHANNEL_NAME
     }
@@ -1453,6 +1457,20 @@ mod tests {
         assert!(channel.process(43, &rejected).is_err());
 
         assert!(channel.drain_output().0.is_none());
+    }
+
+    #[test]
+    fn replay_accepts_first_fragment_of_full_4k_graphics_update() {
+        let mut channel = DrdynvcClient::new();
+        channel
+            .attach_established_dynamic_channel(43, ReplayEgfxChannel::new())
+            .unwrap();
+        let fragment = DrdynvcServerPdu::Data(DrdynvcDataPdu::DataFirst(ironrdp_dvc::pdu::DataFirstPdu::new(
+            43,
+            3840 * 2160 * 4,
+            vec![0],
+        )));
+        assert!(channel.process(&encode_vec(&fragment).unwrap()).unwrap().is_empty());
     }
 
     #[test]

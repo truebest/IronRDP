@@ -128,7 +128,10 @@ impl DynamicVirtualChannel {
 
     fn process(&mut self, pdu: DrdynvcDataPdu) -> PduResult<Vec<DvcMessage>> {
         let channel_id = pdu.channel_id();
-        let complete_data = self.complete_data.process_data(pdu).map_err(|e| decode_err!(e))?;
+        let complete_data = self
+            .complete_data
+            .process_data(pdu, self.channel_processor.maximum_message_size())
+            .map_err(|e| decode_err!(e))?;
         if let Some(complete_data) = complete_data {
             self.channel_processor.process(channel_id, &complete_data)
         } else {
