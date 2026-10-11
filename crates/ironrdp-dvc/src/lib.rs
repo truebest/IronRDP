@@ -99,6 +99,11 @@ pub trait DvcProcessor: AsAny + Send {
     /// The name of the channel, e.g. "Microsoft::Windows::RDS::DisplayControl"
     fn channel_name(&self) -> &str;
 
+    /// Largest accepted incoming message, checked before fragmented data is retained.
+    fn maximum_message_size(&self) -> usize {
+        16 * 1024 * 1024
+    }
+
     /// Returns any messages that should be sent immediately
     /// upon the channel being created.
     fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>>;

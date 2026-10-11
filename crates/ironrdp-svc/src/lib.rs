@@ -40,6 +40,9 @@ pub type StaticChannelId = u16;
 /// The maximum number of optional static virtual channels negotiated in one RDP session.
 pub const MAX_STATIC_CHANNELS: usize = 31;
 
+/// Largest incoming static channel message, including compressed fragment sequences.
+pub const MAX_CHANNEL_MESSAGE_SIZE: usize = 64 * 1024 * 1024;
+
 /// SVC data to be sent to the server. See [`SvcMessage`] for more information.
 /// Usually returned by the channel-specific methods.
 pub struct SvcProcessorMessages<P: SvcProcessor> {
@@ -371,6 +374,12 @@ impl ChunkProcessor {
         let chunk = cursor.remaining();
         let expected_length = usize::try_from(header.length)
             .map_err(|_| ironrdp_core::invalid_field_err!("length", "channel data length is too large", in: cursor))?;
+        if expected_length > MAX_CHANNEL_MESSAGE_SIZE || chunk.len() > MAX_CHANNEL_MESSAGE_SIZE {
+            self.clear_sequence();
+            return Err(
+                ironrdp_core::invalid_field_err!("length", "channel message exceeds its size limit", in: cursor),
+            );
+        }
         let first = header.flags.contains(ChannelControlFlags::FLAG_FIRST);
         let last = header.flags.contains(ChannelControlFlags::FLAG_LAST);
 
@@ -406,9 +415,10 @@ impl ChunkProcessor {
             ));
         }
 
-        self.chunked_pdu.extend_from_slice(chunk);
-
-        if !header.flags.contains(ChannelControlFlags::PACKET_COMPRESSED) && self.chunked_pdu.len() > expected_length {
+        if self.chunked_pdu.len().checked_add(chunk.len()).is_none_or(|length| {
+            length > MAX_CHANNEL_MESSAGE_SIZE
+                || (!header.flags.contains(ChannelControlFlags::PACKET_COMPRESSED) && length > expected_length)
+        }) {
             self.clear_sequence();
             return Err(ironrdp_core::invalid_field_err!(
                 "length",
@@ -416,6 +426,8 @@ impl ChunkProcessor {
                 in: cursor
             ));
         }
+
+        self.chunked_pdu.extend_from_slice(chunk);
 
         if !last {
             return Ok(None);
@@ -937,5 +949,79 @@ impl Encode for ChannelPduHeader {
 
     fn size(&self) -> usize {
         Self::FIXED_PART_SIZE
+    }
+}
+
+#[cfg(test)]
+mod message_limit_tests {
+    use super::*;
+
+    fn fragment(length: u32, flags: ChannelFlags, bytes: &[u8]) -> Vec<u8> {
+        let mut frame = length.to_le_bytes().to_vec();
+        frame.extend_from_slice(&flags.bits().to_le_bytes());
+        frame.extend_from_slice(bytes);
+        frame
+    }
+
+    #[test]
+    fn bounds_declared_length_before_buffering() {
+        for flags in [
+            ChannelFlags::FIRST,
+            ChannelFlags::FIRST | ChannelFlags::COMPRESSED,
+            ChannelFlags::empty(),
+        ] {
+            let mut accumulator = ChunkProcessor::new();
+            assert!(accumulator.dechunkify(&fragment(u32::MAX, flags, &[1])).is_err());
+            assert!(accumulator.chunked_pdu.is_empty());
+            assert_eq!(accumulator.expected_length, None);
+        }
+    }
+
+    #[test]
+    fn rejects_excess_fragments_before_append_and_accepts_valid_sequence() {
+        let mut accumulator = ChunkProcessor::new();
+        assert_eq!(
+            accumulator
+                .dechunkify(&fragment(4, ChannelFlags::FIRST, &[1, 2]))
+                .unwrap(),
+            None
+        );
+        assert!(
+            accumulator
+                .dechunkify(&fragment(4, ChannelFlags::LAST, &[3, 4, 5]))
+                .is_err()
+        );
+        assert!(accumulator.chunked_pdu.is_empty());
+        assert_eq!(
+            accumulator
+                .dechunkify(&fragment(4, ChannelFlags::FIRST, &[1, 2]))
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            accumulator
+                .dechunkify(&fragment(4, ChannelFlags::LAST, &[3, 4]))
+                .unwrap(),
+            Some(vec![1, 2, 3, 4])
+        );
+        assert_eq!(
+            accumulator
+                .dechunkify(&fragment(3840 * 2160 * 4, ChannelFlags::FIRST, &[1]))
+                .unwrap(),
+            None
+        );
+    }
+    #[test]
+    fn compressed_accumulation_is_bounded_independently_of_declared_length() {
+        let mut accumulator = ChunkProcessor::new();
+        accumulator.expected_length = Some(1);
+        accumulator.chunked_pdu.resize(MAX_CHANNEL_MESSAGE_SIZE, 0);
+        assert!(
+            accumulator
+                .dechunkify(&fragment(1, ChannelFlags::COMPRESSED, &[1]))
+                .is_err()
+        );
+        assert!(accumulator.chunked_pdu.is_empty());
+        assert_eq!(accumulator.expected_length, None);
     }
 }

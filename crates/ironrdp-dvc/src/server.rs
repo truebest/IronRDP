@@ -385,7 +385,11 @@ impl DrdynvcServer {
             return Err(pdu_other_err!("invalid channel state"));
         }
         let mut resp = Vec::new();
-        if let Some(complete) = c.complete_data.process_data(data).map_err(|e| decode_err!(e))? {
+        if let Some(complete) = c
+            .complete_data
+            .process_data(data, c.processor.maximum_message_size())
+            .map_err(|e| decode_err!(e))?
+        {
             let msg = c.processor.process(channel_id, &complete)?;
             resp.extend(encode_dvc_messages(channel_id, msg, ChannelFlags::SHOW_PROTOCOL).map_err(|e| encode_err!(e))?);
         }

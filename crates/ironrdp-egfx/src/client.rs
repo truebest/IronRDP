@@ -1316,6 +1316,11 @@ impl GraphicsPipelineClient {
 impl_as_any!(GraphicsPipelineClient);
 
 impl DvcProcessor for GraphicsPipelineClient {
+    fn maximum_message_size(&self) -> usize {
+        // A full 4K RGBA update is larger than the ordinary channel budget.
+        64 * 1024 * 1024
+    }
+
     fn channel_name(&self) -> &str {
         CHANNEL_NAME
     }
