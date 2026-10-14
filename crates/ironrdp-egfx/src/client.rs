@@ -61,7 +61,7 @@ use ironrdp_graphics::clearcodec::ClearCodecDecoder;
 use ironrdp_graphics::progressive::{ProgressiveDecoder, TILE_BYTES_PER_PIXEL, TILE_DIM};
 use ironrdp_graphics::rdp6::BitmapStreamDecoder;
 use ironrdp_graphics::zgfx;
-use ironrdp_pdu::geometry::ExclusiveRectangle;
+use ironrdp_pdu::geometry::{ExclusiveRectangle, Rectangle as _};
 use ironrdp_pdu::{PduResult, decode_cursor, decode_err, pdu_other_err};
 use tracing::{debug, trace, warn};
 
@@ -69,11 +69,11 @@ use crate::CHANNEL_NAME;
 use crate::compositor::{Compositor, OutputUpdate};
 use crate::decode::H264Decoder;
 use crate::pdu::{
-    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, Encoding, CacheToSurfacePdu, CapabilitiesAdvertisePdu, CapabilitiesV8Flags,
-    CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet, Codec1Type, DeleteEncodingContextPdu,
-    EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu, MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu,
-    MapSurfaceToWindowPdu, PixelFormat, QueueDepth, RawCapabilitySet, SolidFillPdu, SurfaceToCachePdu,
-    SurfaceToSurfacePdu, WireToSurface2Pdu,
+    Avc420BitmapStream, Avc444BitmapStream, CacheImportReplyPdu, CacheToSurfacePdu, CapabilitiesAdvertisePdu,
+    CapabilitiesFrdp1Flags, CapabilitiesV8Flags, CapabilitiesV81Flags, CapabilitiesV107Flags, CapabilitySet,
+    Codec1Type, DeleteEncodingContextPdu, Encoding, EvictCacheEntryPdu, FrameAcknowledgePdu, GfxPdu,
+    MapSurfaceToScaledOutputPdu, MapSurfaceToScaledWindowPdu, MapSurfaceToWindowPdu, PixelFormat, QueueDepth,
+    RawCapabilitySet, SolidFillPdu, SurfaceToCachePdu, SurfaceToSurfacePdu, WireToSurface2Pdu,
 };
 
 /// Consecutive undecodable Progressive payloads before reporting the stream to the handler.
@@ -123,6 +123,8 @@ pub struct CodecCapabilities {
     pub avc420: bool,
     /// AVC444 (H.264 4:4:4) is available
     pub avc444: bool,
+    /// HEVC (H.265) is available, private extension
+    pub hevc: bool,
     /// Small cache mode
     pub small_cache: bool,
     /// Thin client mode
@@ -136,30 +138,35 @@ impl CodecCapabilities {
             CapabilitySet::V8 { flags } => Self {
                 avc420: false,
                 avc444: false,
+                hevc: false,
                 small_cache: flags.contains(CapabilitiesV8Flags::SMALL_CACHE),
                 thin_client: flags.contains(CapabilitiesV8Flags::THIN_CLIENT),
             },
             CapabilitySet::V8_1 { flags } => Self {
                 avc420: flags.contains(CapabilitiesV81Flags::AVC420_ENABLED),
                 avc444: false,
+                hevc: false,
                 small_cache: flags.contains(CapabilitiesV81Flags::SMALL_CACHE),
                 thin_client: flags.contains(CapabilitiesV81Flags::THIN_CLIENT),
             },
             CapabilitySet::V10 { flags } | CapabilitySet::V10_2 { flags } => Self {
                 avc420: !flags.contains(crate::pdu::CapabilitiesV10Flags::AVC_DISABLED),
                 avc444: !flags.contains(crate::pdu::CapabilitiesV10Flags::AVC_DISABLED),
+                hevc: false,
                 small_cache: flags.contains(crate::pdu::CapabilitiesV10Flags::SMALL_CACHE),
                 thin_client: false,
             },
             CapabilitySet::V10_1 => Self {
                 avc420: true,
                 avc444: true,
+                hevc: false,
                 small_cache: false,
                 thin_client: false,
             },
             CapabilitySet::V10_3 { flags } => Self {
                 avc420: !flags.contains(crate::pdu::CapabilitiesV103Flags::AVC_DISABLED),
                 avc444: !flags.contains(crate::pdu::CapabilitiesV103Flags::AVC_DISABLED),
+                hevc: false,
                 small_cache: false,
                 thin_client: flags.contains(crate::pdu::CapabilitiesV103Flags::AVC_THIN_CLIENT),
             },
@@ -169,14 +176,23 @@ impl CodecCapabilities {
             | CapabilitySet::V10_6Err { flags } => Self {
                 avc420: !flags.contains(crate::pdu::CapabilitiesV104Flags::AVC_DISABLED),
                 avc444: !flags.contains(crate::pdu::CapabilitiesV104Flags::AVC_DISABLED),
+                hevc: false,
                 small_cache: flags.contains(crate::pdu::CapabilitiesV104Flags::SMALL_CACHE),
                 thin_client: flags.contains(crate::pdu::CapabilitiesV104Flags::AVC_THIN_CLIENT),
             },
             CapabilitySet::V10_7 { flags } => Self {
                 avc420: !flags.contains(CapabilitiesV107Flags::AVC_DISABLED),
                 avc444: !flags.contains(CapabilitiesV107Flags::AVC_DISABLED),
+                hevc: false,
                 small_cache: flags.contains(CapabilitiesV107Flags::SMALL_CACHE),
                 thin_client: flags.contains(CapabilitiesV107Flags::AVC_THIN_CLIENT),
+            },
+            CapabilitySet::Frdp1 { flags } => Self {
+                avc420: !flags.contains(CapabilitiesFrdp1Flags::AVC_DISABLED),
+                avc444: !flags.contains(CapabilitiesFrdp1Flags::AVC_DISABLED),
+                hevc: flags.contains(CapabilitiesFrdp1Flags::HEVC_SUPPORTED),
+                small_cache: flags.contains(CapabilitiesFrdp1Flags::SMALL_CACHE),
+                thin_client: flags.contains(CapabilitiesFrdp1Flags::AVC_THIN_CLIENT),
             },
         }
     }
@@ -380,6 +396,25 @@ pub trait GraphicsPipelineHandler: Send {
     /// Called for each AVC420 frame before the built-in software decode. `nal` is the raw
     /// H.264 bitstream; return `true` to take ownership and skip the software decode.
     fn on_avc420_frame(
+        &mut self,
+        _surface_id: u16,
+        _left: u16,
+        _top: u16,
+        _width: u16,
+        _height: u16,
+        _nal: &[u8],
+    ) -> bool {
+        false
+    }
+
+    /// Called for each HEVC (H.265) surface frame. `left`/`top`/`width`/`height` are the
+    /// destination rectangle on the surface; `nal` is the raw Annex-B access unit. Return
+    /// `true` to take ownership of the frame.
+    ///
+    /// There is no software HEVC decoder here, so a frame nobody takes is dropped. HEVC
+    /// only arrives at all when the peer advertised
+    /// [`CapabilitiesFrdp1Flags::HEVC_SUPPORTED`].
+    fn on_hevc_frame(
         &mut self,
         _surface_id: u16,
         _left: u16,
@@ -1026,12 +1061,15 @@ impl GraphicsPipelineClient {
 
         let result = match pdu.codec_id {
             Codec1Type::Avc420 => self.decode_avc420(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data),
+            Codec1Type::Hevc => {
+                return self.decode_hevc(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data);
+            }
             Codec1Type::ClearCodec => {
                 self.decode_clearcodec(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data)
             }
             Codec1Type::Planar => self.decode_planar(pdu.surface_id, &pdu.destination_rectangle, &pdu.bitmap_data),
             Codec1Type::Avc444 | Codec1Type::Avc444v2 => {
-                self.decode_avc444(&pdu)
+                return self.decode_avc444(&pdu);
             }
             Codec1Type::Uncompressed => {
                 self.handle_uncompressed(pdu);
@@ -1226,6 +1264,29 @@ impl GraphicsPipelineClient {
             .decode(h264_data)
             .map(|_| ())
             .map_err(|e| pdu_other_err!("AVC444 chroma view decode", source: e))
+    }
+
+    /// HEVC travels in the AVC420 envelope: the same metablock, then an Annex-B access
+    /// unit instead of an AVC one. Only the passthrough hook can consume it.
+    fn decode_hevc(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
+        if !self.codec_caps.hevc {
+            return Err(pdu_other_err!("HEVC was not negotiated"));
+        }
+        let mut cursor = ReadCursor::new(bitmap_data);
+        let stream = Avc420BitmapStream::decode(&mut cursor).map_err(|e| decode_err!(e))?;
+
+        if !self.handler.on_hevc_frame(
+            surface_id,
+            dest_rect.left,
+            dest_rect.top,
+            dest_rect.width(),
+            dest_rect.height(),
+            stream.data,
+        ) {
+            debug!("No HEVC consumer configured, dropping frame");
+        }
+
+        Ok(())
     }
 
     fn decode_avc420(&mut self, surface_id: u16, dest_rect: &ExclusiveRectangle, bitmap_data: &[u8]) -> PduResult<()> {
@@ -1745,6 +1806,66 @@ mod tests {
         fn on_frame_complete(&mut self, _frame_id: u32) {}
         fn on_close(&mut self) {}
         fn on_unhandled_pdu(&mut self, _pdu: &GfxPdu) {}
+    }
+
+    #[test]
+    fn hevc_wire_frame_requires_confirmation_and_preserves_annexb() {
+        struct HevcHandler(Arc<Mutex<Vec<u8>>>);
+        impl GraphicsPipelineHandler for HevcHandler {
+            fn on_hevc_frame(
+                &mut self,
+                _id: u16,
+                _left: u16,
+                _top: u16,
+                _width: u16,
+                _height: u16,
+                nal: &[u8],
+            ) -> bool {
+                *self.0.lock().unwrap() = nal.to_vec();
+                true
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut client = GraphicsPipelineClient::new(Box::new(HevcHandler(Arc::clone(&seen))), None);
+        client
+            .handle_pdu(GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
+                surface_id: 1,
+                width: 16,
+                height: 16,
+                pixel_format: PixelFormat::XRgb,
+            }))
+            .unwrap();
+        let nal = [0, 0, 1, 38, 1];
+        let bitmap_data = ironrdp_core::encode_vec(&Avc420BitmapStream {
+            rectangles: vec![],
+            quant_qual_vals: vec![],
+            data: &nal,
+        })
+        .unwrap();
+        let frame = GfxPdu::WireToSurface1(crate::pdu::WireToSurface1Pdu {
+            surface_id: 1,
+            codec_id: Codec1Type::Hevc,
+            pixel_format: PixelFormat::XRgb,
+            destination_rectangle: ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 16,
+                bottom: 16,
+            },
+            bitmap_data,
+        });
+        assert!(client.handle_pdu(frame.clone()).is_err());
+        assert!(seen.lock().unwrap().is_empty());
+        let caps = CapabilitySet::Frdp1 {
+            flags: CapabilitiesFrdp1Flags::HEVC_SUPPORTED | CapabilitiesFrdp1Flags::AVC_THIN_CLIENT,
+        };
+        let confirm = GfxPdu::CapabilitiesConfirm(crate::pdu::CapabilitiesConfirmPdu::from_typed(&caps));
+        let bytes = ironrdp_core::encode_vec(&confirm).unwrap();
+        client.handle_pdu(ironrdp_core::decode(&bytes).unwrap()).unwrap();
+        assert_eq!(client.negotiated_capabilities(), Some(&caps));
+        let bytes = ironrdp_core::encode_vec(&frame).unwrap();
+        client.handle_pdu(ironrdp_core::decode(&bytes).unwrap()).unwrap();
+        assert_eq!(*seen.lock().unwrap(), nal);
     }
 
     /// Captures bitmap updates and unhandled PDUs so a test can tell decode from

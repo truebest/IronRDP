@@ -9,6 +9,9 @@ The lgnome patch set retains:
 - Optional connector CredSSP dependencies; lgnome supplies its own authentication.
 - Typed DVC listeners across server-driven channel recreation.
 - Hardware AVC420/base-view passthrough and auxiliary-view callbacks.
+- Private HEVC passthrough: `FRDP_1` (`0x00010000`), flag `0x40000000`,
+  codec ID `0x0002`, AVC420 metablock followed by Annex-B. HEVC payloads require
+  capability confirmation; no software HEVC decoder is included.
 - Compositor opt-out for direct native presentation.
 - Partial Progressive output, preserved codec state across dropped updates, and bounded
   undecodable-stream reporting.
