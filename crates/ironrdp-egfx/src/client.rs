@@ -1242,7 +1242,7 @@ impl GraphicsPipelineClient {
             return self.decode_avc444_aux(stream.stream1.data);
         }
 
-        self.decode_avc420_stream(pdu.surface_id, &pdu.destination_rectangle, stream.stream1.data)?;
+        self.decode_avc420_stream(pdu.surface_id, &pdu.destination_rectangle, &stream.stream1)?;
 
         if let Some(aux) = stream.stream2 {
             self.decode_avc444_aux(aux.data)?;
@@ -1293,15 +1293,16 @@ impl GraphicsPipelineClient {
         let mut cursor = ReadCursor::new(bitmap_data);
         let stream = Avc420BitmapStream::decode(&mut cursor).map_err(|e| decode_err!(e))?;
 
-        self.decode_avc420_stream(surface_id, dest_rect, stream.data)
+        self.decode_avc420_stream(surface_id, dest_rect, &stream)
     }
 
     fn decode_avc420_stream(
         &mut self,
         surface_id: u16,
         dest_rect: &ExclusiveRectangle,
-        h264_data: &[u8],
+        stream: &Avc420BitmapStream<'_>,
     ) -> PduResult<()> {
+        let h264_data = stream.data;
         if self.handler.on_avc420_frame(
             surface_id,
             dest_rect.left,
@@ -1836,7 +1837,7 @@ mod tests {
             }))
             .unwrap();
         let nal = [0, 0, 1, 38, 1];
-        let bitmap_data = ironrdp_core::encode_vec(&Avc420BitmapStream {
+        let bitmap_data = encode_vec(&Avc420BitmapStream {
             rectangles: vec![],
             quant_qual_vals: vec![],
             data: &nal,
@@ -1860,10 +1861,10 @@ mod tests {
             flags: CapabilitiesFrdp1Flags::HEVC_SUPPORTED | CapabilitiesFrdp1Flags::AVC_THIN_CLIENT,
         };
         let confirm = GfxPdu::CapabilitiesConfirm(crate::pdu::CapabilitiesConfirmPdu::from_typed(&caps));
-        let bytes = ironrdp_core::encode_vec(&confirm).unwrap();
+        let bytes = encode_vec(&confirm).unwrap();
         client.handle_pdu(ironrdp_core::decode(&bytes).unwrap()).unwrap();
         assert_eq!(client.negotiated_capabilities(), Some(&caps));
-        let bytes = ironrdp_core::encode_vec(&frame).unwrap();
+        let bytes = encode_vec(&frame).unwrap();
         client.handle_pdu(ironrdp_core::decode(&bytes).unwrap()).unwrap();
         assert_eq!(*seen.lock().unwrap(), nal);
     }
@@ -3099,7 +3100,7 @@ mod tests {
             None,
         );
         let process = |client: &mut GraphicsPipelineClient, pdu: &GfxPdu| {
-            let bytes = ironrdp_core::encode_vec(pdu).unwrap();
+            let bytes = encode_vec(pdu).unwrap();
             client.process(0, &zgfx::wrap_uncompressed(&bytes)).unwrap();
         };
         let confirm = GfxPdu::CapabilitiesConfirm(CapabilitiesConfirmPdu::from_typed(&CapabilitySet::V10_7 {
@@ -3502,7 +3503,7 @@ mod tests {
         let mut handler = GraphicsPipelineClient::new(Box::new(TestHandler), None);
         handler.total_frames_decoded = 3;
         let responses = handler.handle_end_frame(7).unwrap();
-        let bytes = ironrdp_core::encode_vec(responses[0].as_ref()).unwrap();
+        let bytes = encode_vec(responses[0].as_ref()).unwrap();
         let GfxPdu::FrameAcknowledge(ack) = ironrdp_core::decode::<GfxPdu>(&bytes).unwrap() else {
             panic!("expected frame ack")
         };

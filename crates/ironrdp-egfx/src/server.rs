@@ -919,6 +919,7 @@ impl CodecCapabilities {
             CapabilitySet::Frdp1 { flags } => Self {
                 avc420: !flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_DISABLED),
                 avc444: !flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_DISABLED),
+                avc420_in_mixed_frames: false,
                 small_cache: flags.contains(crate::pdu::CapabilitiesFrdp1Flags::SMALL_CACHE),
                 thin_client: flags.contains(crate::pdu::CapabilitiesFrdp1Flags::AVC_THIN_CLIENT),
             },

@@ -213,7 +213,7 @@ impl Sequence for ConnectionActivationSequence {
                             return Ok(Written::Nothing);
                         }
 
-                        return Err(crate::ConnectorError::new(
+                        return Err(ConnectorError::new(
                             "ConnectionActivation::CapabilitiesExchange",
                             crate::ConnectorErrorKind::ServerErrorInfo(error_info),
                         ));

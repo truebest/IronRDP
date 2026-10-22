@@ -63,12 +63,21 @@ impl CompleteData {
         Ok(data)
     }
 
-    fn process_data_first(&mut self, total_size: u32, data: Vec<u8>, maximum_size: usize) -> DecodeResult<Option<Vec<u8>>> {
+    fn process_data_first(
+        &mut self,
+        total_size: u32,
+        data: Vec<u8>,
+        maximum_size: usize,
+    ) -> DecodeResult<Option<Vec<u8>>> {
         self.total_size = 0;
         self.data.clear();
         let total_size: usize = cast_length!("DataFirstPdu::length", total_size)?;
         if total_size > maximum_size || data.len() > total_size {
-            Err(invalid_field_err!("DVC message", "length", "message exceeds its size limit"))
+            Err(invalid_field_err!(
+                "DVC message",
+                "length",
+                "message exceeds its size limit"
+            ))
         } else if total_size == data.len() {
             Ok(Some(data))
         } else {
@@ -81,12 +90,25 @@ impl CompleteData {
     fn process_data_block(&mut self, data: Vec<u8>, maximum_size: usize) -> DecodeResult<Option<Vec<u8>>> {
         if self.total_size == 0 {
             if data.len() > maximum_size {
-                Err(invalid_field_err!("DVC message", "data", "message exceeds its size limit"))
+                Err(invalid_field_err!(
+                    "DVC message",
+                    "data",
+                    "message exceeds its size limit"
+                ))
             } else {
                 Ok(Some(data))
             }
-        } else if self.data.len().checked_add(data.len()).is_none_or(|length| length > self.total_size || length > maximum_size) {
-            Err(invalid_field_err!("DVC message", "data", "fragments exceed the message size limit"))
+        } else if self
+            .data
+            .len()
+            .checked_add(data.len())
+            .is_none_or(|length| length > self.total_size || length > maximum_size)
+        {
+            Err(invalid_field_err!(
+                "DVC message",
+                "data",
+                "fragments exceed the message size limit"
+            ))
         } else {
             self.data.extend_from_slice(&data);
             if self.data.len() == self.total_size {

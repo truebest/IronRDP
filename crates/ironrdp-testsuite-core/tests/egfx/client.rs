@@ -313,6 +313,83 @@ fn protocol_reset_ignores_resize_until_confirmation() {
     assert_eq!(client.take_output_reset(), Some((32, 16)));
 }
 
+// oracle: mutant re-enabling software composition after a protocol reset.
+#[test]
+fn protocol_reset_preserves_compositor_opt_out() {
+    struct DirectHandler;
+    impl GraphicsPipelineHandler for DirectHandler {
+        fn wants_composited_output(&self) -> bool {
+            false
+        }
+    }
+    let mut client = GraphicsPipelineClient::new(Box::new(DirectHandler), None);
+    let paint = [
+        v107_confirm(),
+        GfxPdu::ResetGraphics(ResetGraphicsPdu {
+            width: 16,
+            height: 16,
+            monitors: vec![],
+        }),
+        create_surface(7, 16, 16),
+        GfxPdu::MapSurfaceToOutput(MapSurfaceToOutputPdu {
+            surface_id: 7,
+            output_origin_x: 0,
+            output_origin_y: 0,
+        }),
+        GfxPdu::SolidFill(SolidFillPdu {
+            surface_id: 7,
+            fill_pixel: Color {
+                r: 255,
+                g: 0,
+                b: 0,
+                xa: 255,
+            },
+            rectangles: vec![ExclusiveRectangle {
+                left: 0,
+                top: 0,
+                right: 16,
+                bottom: 16,
+            }],
+        }),
+        GfxPdu::EndFrame(EndFramePdu { frame_id: 1 }),
+    ];
+    for _ in 0..2 {
+        for pdu in &paint {
+            client.process(0, &encode_for_process(pdu)).unwrap();
+        }
+        assert!(client.drain_output().is_empty());
+        assert!(client.request_protocol_reset().is_some());
+    }
+}
+
+// oracle: reference the Windows reset-count capture and with_suspended_frame_acknowledgments contract.
+#[test]
+fn protocol_reset_rearms_suspension_ack_with_restarted_count() {
+    use ironrdp_egfx::pdu::{FrameAcknowledgePdu, QueueDepth};
+
+    let mut client =
+        GraphicsPipelineClient::new(Box::new(TestHandler::new()), None).with_suspended_frame_acknowledgments();
+    for frame_id in [1, 3] {
+        client.process(0, &encode_for_process(&v107_confirm())).unwrap();
+        let replies = client
+            .process(0, &encode_for_process(&GfxPdu::EndFrame(EndFramePdu { frame_id })))
+            .unwrap();
+        assert_eq!(replies.len(), 1);
+        let bytes = encode_vec(replies[0].as_ref()).unwrap();
+        assert_eq!(
+            GfxPdu::decode(&mut ReadCursor::new(&bytes)).unwrap(),
+            GfxPdu::FrameAcknowledge(FrameAcknowledgePdu {
+                frame_id,
+                total_frames_decoded: 1,
+                queue_depth: QueueDepth::Suspend,
+            })
+        );
+        let next = GfxPdu::EndFrame(EndFramePdu { frame_id: frame_id + 1 });
+        assert!(client.process(0, &encode_for_process(&next)).unwrap().is_empty());
+        assert!(client.request_protocol_reset().is_some());
+    }
+}
+
 // oracle: spec MS-RDPEGFX §3.3.5.19 permits resets only with V10.3-V10.7.
 #[rstest]
 #[case::v8(CapabilitySet::V8 { flags: CapabilitiesV8Flags::empty() })]

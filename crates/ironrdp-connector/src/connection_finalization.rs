@@ -9,7 +9,6 @@ use tracing::{debug, warn};
 
 use crate::{
     ConnectorError, ConnectorErrorExt as _, ConnectorResult, MonotonicInstant, Sequence, State, Written, general_err,
-    reason_err,
 };
 
 #[derive(Default, Debug, Copy, Clone)]
@@ -245,7 +244,7 @@ impl Sequence for ConnectionFinalizationSequence {
                                 server_error_info::ProtocolIndependentCode::None,
                             ) => ConnectionFinalizationState::WaitForResponse,
                             _ => {
-                                return Err(crate::ConnectorError::new(
+                                return Err(ConnectorError::new(
                                     "ServerSetErrorInfo",
                                     crate::ConnectorErrorKind::ServerErrorInfo(error_info),
                                 ));

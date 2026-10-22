@@ -548,3 +548,51 @@ fn tunnel_refuses_a_create_request_before_the_capabilities_exchange() {
         .expect("Create Request on the tunnel should be processed after the capabilities exchange");
     assert_eq!(client.tunnel_for_channel(16), Some(SoftSyncTunnelType::RELIABLE_UDP));
 }
+
+// Oracle: reference DvcProcessor::maximum_message_size, including decompressed bytes.
+#[test]
+fn compressed_data_obeys_the_reassembly_budget() {
+    struct BoundedDvc(RecordedDvc);
+    impl_as_any!(BoundedDvc);
+    impl DvcProcessor for BoundedDvc {
+        fn channel_name(&self) -> &str {
+            "bounded"
+        }
+        fn maximum_message_size(&self) -> usize {
+            4
+        }
+        fn start(&mut self, channel_id: u32) -> PduResult<Vec<DvcMessage>> {
+            self.0.start(channel_id)
+        }
+        fn process(&mut self, channel_id: u32, payload: &[u8]) -> PduResult<Vec<DvcMessage>> {
+            self.0.process(channel_id, payload)
+        }
+    }
+    impl DvcClientProcessor for BoundedDvc {}
+
+    let mut client = DrdynvcClient::new();
+    exchange_capabilities(&mut client);
+    client
+        .attach_established_dynamic_channel(3, BoundedDvc(RecordedDvc::default()))
+        .unwrap();
+    let process = |client: &mut DrdynvcClient, pdu| client.process(&encode_vec(&DrdynvcServerPdu::Data(pdu)).unwrap());
+    let literal = vec![0xe0, 0x06, b'x', b'y', b'z'];
+    let single = DrdynvcDataPdu::DataCompressed(DataCompressedPdu::new(3, vec![0xe0, 0x06, 1, 2, 3, 4, 5]));
+    assert!(process(&mut client, single).is_err());
+    let oversized = DrdynvcDataPdu::DataFirstCompressed(DataFirstCompressedPdu::new(3, 5, literal.clone()));
+    assert!(process(&mut client, oversized).is_err());
+    let first = DrdynvcDataPdu::DataFirstCompressed(DataFirstCompressedPdu::new(3, 4, literal.clone()));
+    assert!(process(&mut client, first).unwrap().is_empty());
+    let last = DrdynvcDataPdu::DataCompressed(DataCompressedPdu::new(3, literal));
+    assert!(process(&mut client, last).is_err());
+    process(&mut client, DrdynvcDataPdu::Data(DataPdu::new(3, b"ok".to_vec()))).unwrap();
+    assert_eq!(
+        client
+            .get_dvc_by_channel_id::<BoundedDvc>(3)
+            .unwrap()
+            .processor()
+            .0
+            .received,
+        vec![b"ok".to_vec()]
+    );
+}

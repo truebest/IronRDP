@@ -171,8 +171,6 @@ impl ProtocolIndependentCode {
                 "The display driver in the remote session started up successfully, but due to internal failures was not usable by the remoting stack"
             }
             Self::ServerWinlogonCrash => "The Winlogon process running in the remote session terminated unexpectedly",
-            Self::ServerShutdown => "The remote server is shutting down",
-            Self::ServerReboot => "The remote server is restarting",
             Self::ServerCsrssCrash => "The CSRSS process running in the remote session terminated unexpectedly",
             Self::ServerShutdown => "The remote server is busy shutting down",
             Self::ServerReboot => "The remote server is busy rebooting",

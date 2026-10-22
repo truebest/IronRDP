@@ -2,7 +2,10 @@
 
 Upstream: https://github.com/Devolutions/IronRDP
 
-Base: `1bec1d57f446a7ddef8f26b0c3c644059564cdc2` (2026-09-06).
+Base: `e4a0d17b8e5b1b81758202dc131d8fa2aed58a23` (2026-10-23).
+
+Client protocol reset, including the Windows ACK restart and terminal reset errors,
+is provided by merged [upstream PR #2207](https://github.com/Devolutions/IronRDP/pull/2207).
 
 The lgnome patch set retains:
 
@@ -12,10 +15,10 @@ The lgnome patch set retains:
 - Private HEVC passthrough: `FRDP_1` (`0x00010000`), flag `0x40000000`,
   codec ID `0x0002`, AVC420 metablock followed by Annex-B. HEVC payloads require
   capability confirmation; no software HEVC decoder is included.
-- Compositor opt-out for direct native presentation.
+- Compositor opt-out for direct native presentation, preserved across graphics resets.
 - Partial Progressive output, preserved codec state across dropped updates, and bounded
   undecodable-stream reporting.
-- Windows SRL decoding fixes and optional frame-acknowledgment suspension.
+- Optional frame-acknowledgment suspension, rearmed after a graphics reset.
 - Typed server termination reasons during activation and active sessions.
 - The screenshot diagnostic's graphics probes.
 - Bounded incoming virtual-channel reassembly: 16 MiB for ordinary DVC messages,
@@ -23,12 +26,11 @@ The lgnome patch set retains:
   The capture replay graphics wrapper forwards the EGFX budget.
 
 Upstream now provides REGION clipping, the Windows Progressive context/quality fixes,
-and configurable early EGFX capability advertisement. The fork uses those implementations.
+Windows SRL decoding, and configurable early EGFX capability advertisement.
+The fork uses those implementations.
 
-For the reassembly fix, upstream `master` was fetched and inspected at
-`e4143f26306a6639a889d80c1c484ca69c365a8f` (2026-10-11). Its DVC accumulator
-matched the fork and its SVC accumulator still lacked a message budget, so the
-limits are a local fork patch; the existing patch set above is retained.
+Reassembly limits also apply to decompressed DVC messages while retaining the upstream
+per-channel RDP 8.0 Lite compression history.
 
 Progressive decode failures preserve tile contexts on every surface. The client retains
 its cumulative, rate-limited failure logging and reports sustained undecodable streams

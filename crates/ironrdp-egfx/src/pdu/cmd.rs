@@ -1710,19 +1710,41 @@ impl<'de> Decode<'de> for RawCapabilitySet {
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CapabilitySet {
-    V8 { flags: CapabilitiesV8Flags },
-    V8_1 { flags: CapabilitiesV81Flags },
-    V10 { flags: CapabilitiesV10Flags },
+    V8 {
+        flags: CapabilitiesV8Flags,
+    },
+    V8_1 {
+        flags: CapabilitiesV81Flags,
+    },
+    V10 {
+        flags: CapabilitiesV10Flags,
+    },
     V10_1,
-    V10_2 { flags: CapabilitiesV10Flags },
-    V10_3 { flags: CapabilitiesV103Flags },
-    V10_4 { flags: CapabilitiesV104Flags },
-    V10_5 { flags: CapabilitiesV104Flags },
-    V10_6 { flags: CapabilitiesV104Flags },
-    V10_6Err { flags: CapabilitiesV104Flags },
-    V10_7 { flags: CapabilitiesV107Flags },
+    V10_2 {
+        flags: CapabilitiesV10Flags,
+    },
+    V10_3 {
+        flags: CapabilitiesV103Flags,
+    },
+    V10_4 {
+        flags: CapabilitiesV104Flags,
+    },
+    V10_5 {
+        flags: CapabilitiesV104Flags,
+    },
+    V10_6 {
+        flags: CapabilitiesV104Flags,
+    },
+    V10_6Err {
+        flags: CapabilitiesV104Flags,
+    },
+    V10_7 {
+        flags: CapabilitiesV107Flags,
+    },
     /// Private extension set, see [`CapabilityVersion::FRDP_1`].
-    Frdp1 { flags: CapabilitiesFrdp1Flags },
+    Frdp1 {
+        flags: CapabilitiesFrdp1Flags,
+    },
 }
 
 impl CapabilitySet {
