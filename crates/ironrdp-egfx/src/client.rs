@@ -472,6 +472,8 @@ pub trait GraphicsPipelineHandler: Send {
 enum ClientState {
     /// Waiting for server `CapabilitiesConfirm`
     WaitingForConfirm,
+    /// Protocol reset sent; ignore in-flight graphics until the new confirmation.
+    Resetting,
     /// Channel is active, processing frames
     Active,
     /// Channel has been closed
@@ -579,6 +581,48 @@ impl GraphicsPipelineClient {
         self.negotiated_caps.as_ref()
     }
 
+    /// Request an in-channel protocol reset with the same negotiated capabilities.
+    ///
+    /// [MS-RDPEGFX 3.3.5.19] permits this for V10.3 and later standard capability sets.
+    /// Returns `None` before negotiation, during a reset, or for unsupported versions.
+    /// The caller must send the returned PDU on this graphics channel.
+    ///
+    /// [MS-RDPEGFX 3.3.5.19]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/a720af02-0a47-44e2-a934-dc8534062b44
+    pub fn request_protocol_reset(&mut self) -> Option<GfxPdu> {
+        if !self.is_active() {
+            return None;
+        }
+        let caps = self.negotiated_caps.as_ref()?;
+        if !matches!(
+            caps,
+            CapabilitySet::V10_3 { .. }
+                | CapabilitySet::V10_4 { .. }
+                | CapabilitySet::V10_5 { .. }
+                | CapabilitySet::V10_6 { .. }
+                | CapabilitySet::V10_6Err { .. }
+                | CapabilitySet::V10_7 { .. }
+        ) {
+            return None;
+        }
+        let pdu = GfxPdu::CapabilitiesAdvertise(CapabilitiesAdvertisePdu::from_typed(core::slice::from_ref(caps)));
+        self.state = ClientState::Resetting;
+        self.surfaces.clear();
+        self.compositor.reset(0, 0);
+        self.clearcodec_decoder = None;
+        self.planar_decoder = BitmapStreamDecoder::default();
+        self.progressive_decoder = ProgressiveDecoder::new();
+        self.progressive_failures_in_a_row = 0;
+        if let Some(decoder) = self.h264_decoder.as_mut() {
+            decoder.reset();
+        }
+        self.current_frame_id = None;
+        self.frames_queued = 0;
+        self.total_frames_decoded = 0;
+        self.frame_acknowledgments_suspended = false;
+        // ZGFX history must still decode packets already in flight before confirmation.
+        Some(pdu)
+    }
+
     /// Get codec capabilities determined from negotiation
     #[must_use]
     pub fn codec_capabilities(&self) -> &CodecCapabilities {
@@ -614,6 +658,9 @@ impl GraphicsPipelineClient {
     // ========================================================================
 
     fn handle_pdu(&mut self, pdu: GfxPdu) -> PduResult<Vec<DvcMessage>> {
+        if self.state == ClientState::Resetting && !matches!(pdu, GfxPdu::CapabilitiesConfirm(_)) {
+            return Ok(Vec::new());
+        }
         match pdu {
             GfxPdu::CapabilitiesConfirm(confirm) => {
                 self.handle_capabilities_confirm(confirm.0);
@@ -757,6 +804,15 @@ impl GraphicsPipelineClient {
     }
 
     fn handle_capabilities_confirm(&mut self, cap: RawCapabilitySet) {
+        if self.state == ClientState::Resetting {
+            match cap.parsed() {
+                Ok(Some(ref typed)) if Some(typed) == self.negotiated_caps.as_ref() => {}
+                _ => {
+                    warn!("Ignoring graphics reset confirmation that differs from the advertised capabilities");
+                    return;
+                }
+            }
+        }
         // Server confirms a single capability set. If we cannot interpret it
         // (unknown version, or malformed body), we still transition to Active
         // to avoid hanging the session, but we keep `negotiated_caps` empty
@@ -1969,6 +2025,96 @@ mod tests {
         client.close(0);
         assert_eq!(client.state, ClientState::Closed);
         assert!(!client.is_active());
+    }
+
+    #[test]
+    fn protocol_reset_preserves_capabilities_and_discards_in_flight_graphics() {
+        let caps = CapabilitySet::V10_7 {
+            flags: CapabilitiesV107Flags::SMALL_CACHE | CapabilitiesV107Flags::AVC_THIN_CLIENT,
+        };
+        let mut client =
+            GraphicsPipelineClient::new(Box::new(TestHandler), None).with_suspended_frame_acknowledgments();
+        assert!(client.request_protocol_reset().is_none());
+        client.handle_capabilities_confirm(RawCapabilitySet::from(&caps));
+        client.handle_create_surface(1, 16, 16, PixelFormat::XRgb);
+        client.total_frames_decoded = 99;
+        client.frame_acknowledgments_suspended = true;
+        let Some(GfxPdu::CapabilitiesAdvertise(advertise)) = client.request_protocol_reset() else {
+            panic!("graphics reset must advertise capabilities");
+        };
+        assert_eq!(
+            advertise,
+            CapabilitiesAdvertisePdu::from_typed(core::slice::from_ref(&caps))
+        );
+        assert!(!client.is_active());
+        assert!(client.surfaces.is_empty());
+        assert_eq!(client.total_frames_decoded, 0);
+        assert!(!client.frame_acknowledgments_suspended);
+        assert!(client.request_protocol_reset().is_none());
+        client
+            .handle_pdu(GfxPdu::CreateSurface(crate::pdu::CreateSurfacePdu {
+                surface_id: 2,
+                width: 16,
+                height: 16,
+                pixel_format: PixelFormat::XRgb,
+            }))
+            .unwrap();
+        assert!(client.surfaces.is_empty());
+        assert!(
+            client
+                .handle_pdu(GfxPdu::EndFrame(crate::pdu::EndFramePdu { frame_id: 99 }))
+                .unwrap()
+                .is_empty()
+        );
+        let mut malformed = RawCapabilitySet::from(&caps);
+        malformed.data.clear();
+        for rejected in [
+            malformed,
+            RawCapabilitySet::from(&CapabilitySet::V8 {
+                flags: CapabilitiesV8Flags::empty(),
+            }),
+        ] {
+            client.handle_capabilities_confirm(rejected);
+            assert!(!client.is_active());
+        }
+        client
+            .handle_pdu(GfxPdu::CapabilitiesConfirm(
+                crate::pdu::CapabilitiesConfirmPdu::from_typed(&caps),
+            ))
+            .unwrap();
+        assert!(client.is_active());
+        assert_eq!(client.negotiated_capabilities(), Some(&caps));
+        assert_eq!(
+            client
+                .handle_pdu(GfxPdu::EndFrame(crate::pdu::EndFramePdu { frame_id: 1 }))
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(client.frame_acknowledgments_suspended);
+    }
+
+    #[test]
+    fn protocol_reset_rejects_legacy_and_private_versions() {
+        for caps in [
+            CapabilitySet::V8 {
+                flags: CapabilitiesV8Flags::empty(),
+            },
+            CapabilitySet::V8_1 {
+                flags: CapabilitiesV81Flags::AVC420_ENABLED,
+            },
+            CapabilitySet::V10_2 {
+                flags: crate::pdu::CapabilitiesV10Flags::empty(),
+            },
+            CapabilitySet::Frdp1 {
+                flags: CapabilitiesFrdp1Flags::HEVC_SUPPORTED,
+            },
+        ] {
+            let mut client = GraphicsPipelineClient::new(Box::new(TestHandler), None);
+            client.handle_capabilities_confirm(RawCapabilitySet::from(&caps));
+            assert!(client.request_protocol_reset().is_none());
+            assert!(client.is_active());
+        }
     }
 
     #[test]

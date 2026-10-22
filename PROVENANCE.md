@@ -16,6 +16,8 @@ The lgnome patch set retains:
 - Partial Progressive output, preserved codec state across dropped updates, and bounded
   undecodable-stream reporting.
 - Windows SRL decoding fixes and optional frame-acknowledgment suspension.
+- Graphics-only protocol reset for standard V10.3-V10.7: re-advertise negotiated
+  capabilities and discard in-flight graphics until a matching confirmation.
 - Typed server termination reasons during activation and active sessions.
 - The screenshot diagnostic's graphics probes.
 - Bounded incoming virtual-channel reassembly: 16 MiB for ordinary DVC messages,
